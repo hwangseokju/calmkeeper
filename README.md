@@ -7,7 +7,7 @@ It does not kill apps. It protects the foreground app and common Windows system 
 - lowers eligible background process priority from `Normal` to `BelowNormal`, or from `AboveNormal` to `Normal`
 - trims working sets for memory-heavy background processes when RAM pressure is high
 - restores remembered priorities after the machine cools down
-- exposes Pause, config, log, and Exit through a tray icon
+- exposes status, dry-run mode, last action, Pause, Check now, config, log, and Exit through a tray icon
 - prevents duplicate background instances
 
 ## Run
@@ -57,6 +57,7 @@ Useful knobs:
 - `perProcessActionCooldownSeconds`: avoids repeatedly touching the same process
 - `maxCpuPercentForMemoryTrim`: avoids trimming busy processes unless memory is at emergency level
 - `memoryEmergencyPercent`: allows more aggressive RAM trimming only when memory pressure is severe
+- `protectForegroundProcessName`: protects sibling/helper processes that share the recently focused app name
 - `protectedProcessNames`: processes never touched; keep Windows security, shell, and work-critical apps here
 - `dryRun`: set to `true` to log what would happen without changing anything
 

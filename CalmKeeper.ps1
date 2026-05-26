@@ -13,11 +13,13 @@ $script:LogPath = Join-Path $PSScriptRoot 'calmkeeper.log'
 $script:OriginalPriorities = @{}
 $script:CpuSamples = @{}
 $script:RecentForegroundPids = @{}
+$script:RecentForegroundNames = @{}
 $script:ProcessActionAt = @{}
 $script:LastActionAt = [datetime]::MinValue
 $script:CpuCount = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS)
 $script:Paused = $false
 $script:LastStatus = 'starting'
+$script:LastActionSummary = 'none'
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -87,6 +89,7 @@ function Get-DefaultConfig {
         restorePriorities = $true
         dryRun = $false
         protectForegroundProcess = $true
+        protectForegroundProcessName = $true
         protectedProcessNames = @(
             'System', 'Idle', 'Registry', 'Secure System',
             'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'smss',
@@ -101,6 +104,82 @@ function Get-DefaultConfig {
         )
         logRetentionLines = 1000
     }
+}
+
+function Get-ClampedInt {
+    param(
+        [object]$Value,
+        [int]$Default,
+        [int]$Minimum,
+        [int]$Maximum
+    )
+
+    try {
+        $number = [int]$Value
+    } catch {
+        $number = $Default
+    }
+
+    return [Math]::Min($Maximum, [Math]::Max($Minimum, $number))
+}
+
+function Get-ClampedDouble {
+    param(
+        [object]$Value,
+        [double]$Default,
+        [double]$Minimum,
+        [double]$Maximum
+    )
+
+    try {
+        $number = [double]$Value
+    } catch {
+        $number = $Default
+    }
+
+    return [Math]::Min($Maximum, [Math]::Max($Minimum, $number))
+}
+
+function Normalize-Config {
+    param([object]$Config)
+
+    $default = Get-DefaultConfig
+    $Config.checkIntervalSeconds = Get-ClampedInt $Config.checkIntervalSeconds $default.checkIntervalSeconds 1 3600
+    $Config.cpuHighPercent = Get-ClampedDouble $Config.cpuHighPercent $default.cpuHighPercent 1 100
+    $Config.memoryHighPercent = Get-ClampedDouble $Config.memoryHighPercent $default.memoryHighPercent 1 100
+    $Config.cpuCoolPercent = Get-ClampedDouble $Config.cpuCoolPercent $default.cpuCoolPercent 0 100
+    $Config.memoryCoolPercent = Get-ClampedDouble $Config.memoryCoolPercent $default.memoryCoolPercent 0 100
+
+    if ($Config.cpuCoolPercent -gt $Config.cpuHighPercent) {
+        $Config.cpuCoolPercent = [Math]::Max(0, $Config.cpuHighPercent - 5)
+    }
+    if ($Config.memoryCoolPercent -gt $Config.memoryHighPercent) {
+        $Config.memoryCoolPercent = [Math]::Max(0, $Config.memoryHighPercent - 5)
+    }
+
+    $Config.actionCooldownSeconds = Get-ClampedInt $Config.actionCooldownSeconds $default.actionCooldownSeconds 0 3600
+    $Config.perProcessActionCooldownSeconds = Get-ClampedInt $Config.perProcessActionCooldownSeconds $default.perProcessActionCooldownSeconds 0 86400
+    $Config.foregroundGraceSeconds = Get-ClampedInt $Config.foregroundGraceSeconds $default.foregroundGraceSeconds 0 3600
+    $Config.minimumProcessMemoryMB = Get-ClampedInt $Config.minimumProcessMemoryMB $default.minimumProcessMemoryMB 1 1048576
+    $Config.minimumProcessCpuPercent = Get-ClampedDouble $Config.minimumProcessCpuPercent $default.minimumProcessCpuPercent 0 100
+    $Config.maxCpuPercentForMemoryTrim = Get-ClampedDouble $Config.maxCpuPercentForMemoryTrim $default.maxCpuPercentForMemoryTrim 0 100
+    $Config.memoryEmergencyPercent = Get-ClampedDouble $Config.memoryEmergencyPercent $default.memoryEmergencyPercent 1 100
+    $Config.maxProcessesPerPass = Get-ClampedInt $Config.maxProcessesPerPass $default.maxProcessesPerPass 1 100
+    $Config.lowerPriority = [bool]$Config.lowerPriority
+    $Config.trimWorkingSet = [bool]$Config.trimWorkingSet
+    $Config.restorePriorities = [bool]$Config.restorePriorities
+    $Config.dryRun = [bool]$Config.dryRun
+    $Config.protectForegroundProcess = [bool]$Config.protectForegroundProcess
+    $Config.protectForegroundProcessName = [bool]$Config.protectForegroundProcessName
+    $Config.logRetentionLines = Get-ClampedInt $Config.logRetentionLines $default.logRetentionLines 0 100000
+
+    if ($null -eq $Config.protectedProcessNames) {
+        $Config.protectedProcessNames = $default.protectedProcessNames
+    } elseif ($Config.protectedProcessNames -isnot [array]) {
+        $Config.protectedProcessNames = @($Config.protectedProcessNames)
+    }
+
+    return $Config
 }
 
 function Write-Log {
@@ -127,7 +206,7 @@ function Read-Config {
     if (-not (Test-Path $ConfigPath)) {
         $default = Get-DefaultConfig
         $default | ConvertTo-Json -Depth 4 | Set-Content -Path $ConfigPath -Encoding UTF8
-        return $default
+        return (Normalize-Config $default)
     }
 
     try {
@@ -140,10 +219,10 @@ function Read-Config {
             }
         }
 
-        return $loaded
+        return (Normalize-Config $loaded)
     } catch {
         Write-Log "Config read failed, using defaults: $($_.Exception.Message)"
-        return Get-DefaultConfig
+        return (Normalize-Config (Get-DefaultConfig))
     }
 }
 
@@ -221,7 +300,8 @@ function Get-SystemCpuPercent {
             Select-Object -ExpandProperty Average
         return [Math]::Round([double]$avg, 1)
     } catch {
-        return 0
+        Write-Log "CPU status unavailable: $($_.Exception.Message)"
+        return $null
     }
 }
 
@@ -231,6 +311,7 @@ function Get-SystemMemoryStatus {
         if ([CalmKeeper.NativeMethods]::GlobalMemoryStatusEx($mem)) {
             $used = $mem.ullTotalPhys - $mem.ullAvailPhys
             return [pscustomobject]@{
+                IsAvailable = $true
                 LoadPercent = [int]$mem.dwMemoryLoad
                 UsedGB = [Math]::Round($used / 1GB, 2)
                 TotalGB = [Math]::Round($mem.ullTotalPhys / 1GB, 2)
@@ -242,6 +323,7 @@ function Get-SystemMemoryStatus {
     }
 
     return [pscustomobject]@{
+        IsAvailable = $false
         LoadPercent = 0
         UsedGB = 0
         TotalGB = 0
@@ -263,8 +345,21 @@ function Get-ForegroundProcessId {
         [uint32]$foregroundProcessId = 0
         [void][CalmKeeper.NativeMethods]::GetWindowThreadProcessId($hwnd, [ref]$foregroundProcessId)
         if ($foregroundProcessId -gt 0) {
-            $script:RecentForegroundPids[[int]$foregroundProcessId] = Get-Date
-            return [int]$foregroundProcessId
+            $pid = [int]$foregroundProcessId
+            $script:RecentForegroundPids[$pid] = Get-Date
+
+            if ([bool]$script:Config.protectForegroundProcessName) {
+                try {
+                    $process = Get-Process -Id $pid -ErrorAction Stop
+                    if (-not [string]::IsNullOrWhiteSpace($process.ProcessName)) {
+                        $script:RecentForegroundNames[$process.ProcessName] = Get-Date
+                    }
+                } catch {
+                    Write-Log "Foreground process name check failed for PID $pid`: $($_.Exception.Message)"
+                }
+            }
+
+            return $pid
         }
     } catch {
         Write-Log "Foreground process check failed: $($_.Exception.Message)"
@@ -292,6 +387,29 @@ function Test-ForegroundProtectedPid {
     return $script:RecentForegroundPids.ContainsKey($ProcessId)
 }
 
+function Test-ForegroundProtectedName {
+    param([string]$ProcessName)
+
+    if (-not [bool]$script:Config.protectForegroundProcessName) {
+        return $false
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ProcessName)) {
+        return $false
+    }
+
+    $graceSeconds = [Math]::Max(0, [int]$script:Config.foregroundGraceSeconds)
+    $now = Get-Date
+
+    foreach ($name in @($script:RecentForegroundNames.Keys)) {
+        if (($now - $script:RecentForegroundNames[$name]).TotalSeconds -gt $graceSeconds) {
+            $script:RecentForegroundNames.Remove($name)
+        }
+    }
+
+    return $script:RecentForegroundNames.ContainsKey($ProcessName)
+}
+
 function Get-ProtectedNameSet {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($name in $script:Config.protectedProcessNames) {
@@ -317,6 +435,9 @@ function Get-ProcessSnapshot {
                 continue
             }
             if (Test-ForegroundProtectedPid -ProcessId $process.Id) {
+                continue
+            }
+            if (Test-ForegroundProtectedName -ProcessName $process.ProcessName) {
                 continue
             }
             if ($protected.Contains($process.ProcessName)) {
@@ -448,6 +569,16 @@ function Set-ProcessActionTime {
     $script:ProcessActionAt["$ActionName`:$ProcessId"] = Get-Date
 }
 
+function Set-LastActionSummary {
+    param(
+        [string]$ActionName,
+        [string]$ProcessName,
+        [int]$ProcessId
+    )
+
+    $script:LastActionSummary = '{0} {1}#{2} at {3:HH:mm:ss}' -f $ActionName, $ProcessName, $ProcessId, (Get-Date)
+}
+
 function Restore-CalmPriorities {
     if (-not [bool]$script:Config.restorePriorities) {
         return 0
@@ -463,6 +594,7 @@ function Restore-CalmPriorities {
                     $process.PriorityClass = $record.Priority
                 }
                 Write-Log "Priority restored $($process.ProcessName)#$($process.Id): $($record.Priority)"
+                Set-LastActionSummary -ActionName 'restore' -ProcessName $process.ProcessName -ProcessId $process.Id
                 $restored++
             }
         } catch {
@@ -482,6 +614,15 @@ function Invoke-CalmPass {
 
     $cpu = Get-SystemCpuPercent
     $mem = Get-SystemMemoryStatus
+
+    if ($null -eq $cpu -or -not $mem.IsAvailable) {
+        $cpuText = if ($null -eq $cpu) { 'unknown' } else { "$cpu%" }
+        $memText = if ($mem.IsAvailable) { "$($mem.LoadPercent)%" } else { 'unknown' }
+        $script:LastStatus = "sensor unavailable CPU $cpuText, RAM $memText"
+        Write-Log $script:LastStatus
+        return $script:LastStatus
+    }
+
     $highCpu = $cpu -ge [double]$script:Config.cpuHighPercent
     $highMem = $mem.LoadPercent -ge [double]$script:Config.memoryHighPercent
     $cool = ($cpu -le [double]$script:Config.cpuCoolPercent) -and
@@ -552,6 +693,7 @@ function Invoke-CalmPass {
                 (Test-ProcessActionReady -ProcessId $item.Id -ActionName 'priority') -and
                 (Set-CalmPriority -Process $item.Process)) {
                 Set-ProcessActionTime -ProcessId $item.Id -ActionName 'priority'
+                Set-LastActionSummary -ActionName 'priority' -ProcessName $item.Name -ProcessId $item.Id
                 $actions++
             }
             if ($highMem -and
@@ -560,6 +702,7 @@ function Invoke-CalmPass {
                 (Test-ProcessActionReady -ProcessId $item.Id -ActionName 'trim') -and
                 (Invoke-WorkingSetTrim -Process $item.Process)) {
                 Set-ProcessActionTime -ProcessId $item.Id -ActionName 'trim'
+                Set-LastActionSummary -ActionName 'trim' -ProcessName $item.Name -ProcessId $item.Id
                 $actions++
             }
         } catch {
@@ -577,11 +720,26 @@ function Invoke-CalmPass {
     return $script:LastStatus
 }
 
+function Stop-CalmKeeper {
+    param([string]$Reason = 'stopping')
+
+    try {
+        $restored = Restore-CalmPriorities
+        Write-Log "$Reason, restored $restored priorities"
+    } catch {
+        Write-Log "$Reason, priority restore failed: $($_.Exception.Message)"
+    }
+}
+
 function Start-ConsoleLoop {
     Write-Host "$script:AppName running. Press Ctrl+C to exit."
-    while ($true) {
-        Invoke-CalmPass | Write-Host
-        Start-Sleep -Seconds ([int]$script:Config.checkIntervalSeconds)
+    try {
+        while ($true) {
+            Invoke-CalmPass | Write-Host
+            Start-Sleep -Seconds ([int]$script:Config.checkIntervalSeconds)
+        }
+    } finally {
+        Stop-CalmKeeper 'Console loop stopped'
     }
 }
 
@@ -594,6 +752,10 @@ function Start-TrayApp {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $statusItem = $menu.Items.Add('Status: starting')
     $statusItem.Enabled = $false
+    $modeItem = $menu.Items.Add("Mode: $(if ($script:DryRun) { 'dry-run' } else { 'active' })")
+    $modeItem.Enabled = $false
+    $lastActionItem = $menu.Items.Add('Last action: none')
+    $lastActionItem.Enabled = $false
     [void]$menu.Items.Add('-')
 
     $pauseItem = $menu.Items.Add('Pause')
@@ -601,11 +763,19 @@ function Start-TrayApp {
         $script:Paused = -not $script:Paused
         if ($script:Paused) {
             $pauseItem.Text = 'Resume'
+            $statusItem.Text = 'Status: paused'
             Write-Log 'Paused from tray'
         } else {
             $pauseItem.Text = 'Pause'
             Write-Log 'Resumed from tray'
         }
+    })
+
+    $runNowItem = $menu.Items.Add('Check now')
+    $runNowItem.Add_Click({
+        $status = Invoke-CalmPass
+        $statusItem.Text = "Status: $status"
+        $lastActionItem.Text = "Last action: $script:LastActionSummary"
     })
 
     $configItem = $menu.Items.Add('Open config')
@@ -625,8 +795,7 @@ function Start-TrayApp {
     $exitItem = $menu.Items.Add('Exit')
     $exitItem.Add_Click({
         Write-Log 'Exiting from tray'
-        $notify.Visible = $false
-        $notify.Dispose()
+        Stop-CalmKeeper 'Tray exit'
         [System.Windows.Forms.Application]::Exit()
     })
 
@@ -640,6 +809,7 @@ function Start-TrayApp {
     $timer.Add_Tick({
         $status = Invoke-CalmPass
         $statusItem.Text = "Status: $status"
+        $lastActionItem.Text = "Last action: $script:LastActionSummary"
         $tip = "$script:AppName - $status"
         if ($tip.Length -gt 63) {
             $tip = $tip.Substring(0, 63)
@@ -649,14 +819,24 @@ function Start-TrayApp {
     $timer.Start()
 
     Write-Log "Tray app started. DryRun=$script:DryRun"
-    [System.Windows.Forms.Application]::Run()
+    try {
+        [System.Windows.Forms.Application]::Run()
+    } finally {
+        Stop-CalmKeeper 'Tray app stopped'
+        $notify.Visible = $false
+        $notify.Dispose()
+    }
 }
 
 Write-Log "Started. PID=$PID DryRun=$script:DryRun Config=$ConfigPath"
 Start-Sleep -Milliseconds 1200
 
 if ($Once) {
-    Invoke-CalmPass | Write-Host
+    try {
+        Invoke-CalmPass | Write-Host
+    } finally {
+        Stop-CalmKeeper 'One-time run stopped'
+    }
     return
 }
 

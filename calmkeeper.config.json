@@ -17,6 +17,7 @@
   "restorePriorities": true,
   "dryRun": false,
   "protectForegroundProcess": true,
+  "protectForegroundProcessName": true,
   "protectedProcessNames": [
     "System",
     "Idle",
