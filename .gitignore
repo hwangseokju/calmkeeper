@@ -1,0 +1,5 @@
+*.log
+*.zip
+
+# Local test-only config files.
+*.test.config.json
