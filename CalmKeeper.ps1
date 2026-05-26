@@ -2,6 +2,7 @@ param(
     [switch]$NoTray,
     [switch]$Once,
     [switch]$WhatIf,
+    [switch]$SelfTest,
     [switch]$InstallStartup,
     [switch]$UninstallStartup,
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'calmkeeper.config.json')
@@ -19,6 +20,7 @@ $script:LastActionAt = [datetime]::MinValue
 $script:CpuCount = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS)
 $script:Paused = $false
 $script:LastStatus = 'starting'
+$script:LastCheckSummary = 'not checked yet'
 $script:LastActionSummary = 'none'
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
@@ -93,12 +95,15 @@ function Get-DefaultConfig {
         protectedProcessNames = @(
             'System', 'Idle', 'Registry', 'Secure System',
             'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'smss',
+            'svchost', 'dllhost', 'WmiPrvSE', 'unsecapp', 'dasHost',
             'fontdrvhost', 'WUDFHost', 'dwm', 'explorer',
-            'SearchIndexer', 'SearchHost', 'StartMenuExperienceHost',
+            'ApplicationFrameHost', 'TextInputHost', 'ctfmon', 'Taskmgr',
+            'SearchIndexer', 'SearchHost', 'SearchProtocolHost', 'SearchFilterHost',
+            'StartMenuExperienceHost',
             'ShellExperienceHost', 'RuntimeBroker', 'sihost',
-            'audiodg', 'spoolsv', 'taskhostw',
+            'audiodg', 'spoolsv', 'taskhostw', 'MoUsoCoreWorker', 'TiWorker',
             'Memory Compression', 'MsMpEng', 'NisSrv',
-            'SecurityHealthService', 'SecurityHealthSystray',
+            'SecurityHealthService', 'SecurityHealthSystray', 'SecurityHealthHost',
             'powershell', 'powershell_ise', 'pwsh', 'cmd', 'conhost',
             'Code', 'devenv', 'Codex'
         )
@@ -484,7 +489,10 @@ function Get-ProcessSnapshot {
 }
 
 function Set-CalmPriority {
-    param([System.Diagnostics.Process]$Process)
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Reason = ''
+    )
 
     if (-not [bool]$script:Config.lowerPriority) {
         return $false
@@ -516,7 +524,8 @@ function Set-CalmPriority {
             $Process.PriorityClass = $target
         }
 
-        Write-Log "Priority $($Process.ProcessName)#$($Process.Id): $current -> $target"
+        $detail = if ([string]::IsNullOrWhiteSpace($Reason)) { '' } else { " reason=[$Reason]" }
+        Write-Log "Priority $($Process.ProcessName)#$($Process.Id): $current -> $target$detail"
         return $true
     } catch {
         Write-Log "Priority skipped $($Process.ProcessName)#$($Process.Id): $($_.Exception.Message)"
@@ -525,7 +534,10 @@ function Set-CalmPriority {
 }
 
 function Invoke-WorkingSetTrim {
-    param([System.Diagnostics.Process]$Process)
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Reason = ''
+    )
 
     if (-not [bool]$script:Config.trimWorkingSet) {
         return $false
@@ -536,7 +548,8 @@ function Invoke-WorkingSetTrim {
             [void][CalmKeeper.NativeMethods]::EmptyWorkingSet($Process.Handle)
         }
 
-        Write-Log "Working set trim $($Process.ProcessName)#$($Process.Id)"
+        $detail = if ([string]::IsNullOrWhiteSpace($Reason)) { '' } else { " reason=[$Reason]" }
+        Write-Log "Working set trim $($Process.ProcessName)#$($Process.Id)$detail"
         return $true
     } catch {
         Write-Log "Working set trim skipped $($Process.ProcessName)#$($Process.Id): $($_.Exception.Message)"
@@ -573,10 +586,32 @@ function Set-LastActionSummary {
     param(
         [string]$ActionName,
         [string]$ProcessName,
-        [int]$ProcessId
+        [int]$ProcessId,
+        [string]$Reason = ''
     )
 
-    $script:LastActionSummary = '{0} {1}#{2} at {3:HH:mm:ss}' -f $ActionName, $ProcessName, $ProcessId, (Get-Date)
+    $summary = '{0} {1}#{2} at {3:HH:mm:ss}' -f $ActionName, $ProcessName, $ProcessId, (Get-Date)
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+        $summary = "$summary - $Reason"
+    }
+    $script:LastActionSummary = $summary
+}
+
+function Get-ShortText {
+    param(
+        [string]$Text,
+        [int]$MaxLength = 70
+    )
+
+    if ([string]::IsNullOrEmpty($Text) -or $Text.Length -le $MaxLength) {
+        return $Text
+    }
+
+    if ($MaxLength -le 3) {
+        return $Text.Substring(0, $MaxLength)
+    }
+
+    return $Text.Substring(0, $MaxLength - 3) + '...'
 }
 
 function Restore-CalmPriorities {
@@ -594,7 +629,7 @@ function Restore-CalmPriorities {
                     $process.PriorityClass = $record.Priority
                 }
                 Write-Log "Priority restored $($process.ProcessName)#$($process.Id): $($record.Priority)"
-                Set-LastActionSummary -ActionName 'restore' -ProcessName $process.ProcessName -ProcessId $process.Id
+                Set-LastActionSummary -ActionName 'restore' -ProcessName $process.ProcessName -ProcessId $process.Id -Reason 'system cooled'
                 $restored++
             }
         } catch {
@@ -607,8 +642,11 @@ function Restore-CalmPriorities {
 }
 
 function Invoke-CalmPass {
+    $checkStartedAt = Get-Date
+
     if ($script:Paused) {
         $script:LastStatus = 'paused'
+        $script:LastCheckSummary = 'paused'
         return $script:LastStatus
     }
 
@@ -619,6 +657,7 @@ function Invoke-CalmPass {
         $cpuText = if ($null -eq $cpu) { 'unknown' } else { "$cpu%" }
         $memText = if ($mem.IsAvailable) { "$($mem.LoadPercent)%" } else { 'unknown' }
         $script:LastStatus = "sensor unavailable CPU $cpuText, RAM $memText"
+        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - sensors unavailable"
         Write-Log $script:LastStatus
         return $script:LastStatus
     }
@@ -634,17 +673,20 @@ function Invoke-CalmPass {
         if ($restored -gt 0) {
             $script:LastStatus += ", restored $restored"
         }
+        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - cool"
         return $script:LastStatus
     }
 
     if (-not ($highCpu -or $highMem)) {
         $script:LastStatus = "watching CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - watching"
         return $script:LastStatus
     }
 
     $cooldown = [int]$script:Config.actionCooldownSeconds
     if (((Get-Date) - $script:LastActionAt).TotalSeconds -lt $cooldown) {
         $script:LastStatus = "pressure CPU $cpu%, RAM $($mem.LoadPercent)%, cooling down"
+        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - cooldown"
         return $script:LastStatus
     }
 
@@ -687,22 +729,29 @@ function Invoke-CalmPass {
     $actions = 0
     foreach ($item in $selectedById.Values) {
         try {
+            $priorityReason = "process CPU $($item.CpuPercent)% >= $minCpu%, system CPU $cpu%"
             if ($highCpu -and
                 $item.HasCpuSample -and
                 $item.CpuPercent -ge $minCpu -and
                 (Test-ProcessActionReady -ProcessId $item.Id -ActionName 'priority') -and
-                (Set-CalmPriority -Process $item.Process)) {
+                (Set-CalmPriority -Process $item.Process -Reason $priorityReason)) {
                 Set-ProcessActionTime -ProcessId $item.Id -ActionName 'priority'
-                Set-LastActionSummary -ActionName 'priority' -ProcessName $item.Name -ProcessId $item.Id
+                Set-LastActionSummary -ActionName 'priority' -ProcessName $item.Name -ProcessId $item.Id -Reason $priorityReason
                 $actions++
+            }
+
+            $trimReason = if ($emergencyMem) {
+                "RAM $($mem.LoadPercent)% >= emergency $($script:Config.memoryEmergencyPercent)%, working set $($item.MemoryMB) MB"
+            } else {
+                "RAM $($mem.LoadPercent)% >= $($script:Config.memoryHighPercent)%, working set $($item.MemoryMB) MB, process CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
             }
             if ($highMem -and
                 $item.MemoryMB -ge $minMemMb -and
                 (($item.HasCpuSample -and $item.CpuPercent -le $maxCpuForTrim) -or $emergencyMem) -and
                 (Test-ProcessActionReady -ProcessId $item.Id -ActionName 'trim') -and
-                (Invoke-WorkingSetTrim -Process $item.Process)) {
+                (Invoke-WorkingSetTrim -Process $item.Process -Reason $trimReason)) {
                 Set-ProcessActionTime -ProcessId $item.Id -ActionName 'trim'
-                Set-LastActionSummary -ActionName 'trim' -ProcessName $item.Name -ProcessId $item.Id
+                Set-LastActionSummary -ActionName 'trim' -ProcessName $item.Name -ProcessId $item.Id -Reason $trimReason
                 $actions++
             }
         } catch {
@@ -713,11 +762,41 @@ function Invoke-CalmPass {
     if ($actions -gt 0) {
         $script:LastActionAt = Get-Date
         $script:LastStatus = "pressure CPU $cpu%, RAM $($mem.LoadPercent)%, actions $actions"
+        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - acted on $actions"
     } else {
         $script:LastStatus = "pressure CPU $cpu%, RAM $($mem.LoadPercent)%, no safe candidates"
+        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - no safe candidates"
     }
     Write-Log $script:LastStatus
     return $script:LastStatus
+}
+
+function Invoke-SelfTest {
+    Write-Host "$script:AppName self-test running in dry-run mode."
+    Write-Log 'Self-test started'
+
+    $script:DryRun = $true
+    $script:Config.cpuHighPercent = 1
+    $script:Config.memoryHighPercent = 1
+    $script:Config.cpuCoolPercent = 0
+    $script:Config.memoryCoolPercent = 0
+    $script:Config.actionCooldownSeconds = 0
+    $script:Config.perProcessActionCooldownSeconds = 0
+    $script:Config.minimumProcessMemoryMB = 1
+    $script:Config.minimumProcessCpuPercent = 0
+    $script:Config.memoryEmergencyPercent = 1
+    $script:Config.maxProcessesPerPass = 3
+
+    Write-Host 'Pass 1: warm CPU samples'
+    [void](Get-ProcessSnapshot)
+    Write-Host 'samples warmed'
+    Start-Sleep -Seconds 2
+    Write-Host 'Pass 2: forced pressure selection'
+    Invoke-CalmPass | Write-Host
+    Write-Host "Last check: $script:LastCheckSummary"
+    Write-Host "Last action: $script:LastActionSummary"
+
+    Stop-CalmKeeper 'Self-test stopped'
 }
 
 function Stop-CalmKeeper {
@@ -752,6 +831,8 @@ function Start-TrayApp {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $statusItem = $menu.Items.Add('Status: starting')
     $statusItem.Enabled = $false
+    $checkItem = $menu.Items.Add('Last check: not checked yet')
+    $checkItem.Enabled = $false
     $modeItem = $menu.Items.Add("Mode: $(if ($script:DryRun) { 'dry-run' } else { 'active' })")
     $modeItem.Enabled = $false
     $lastActionItem = $menu.Items.Add('Last action: none')
@@ -764,6 +845,7 @@ function Start-TrayApp {
         if ($script:Paused) {
             $pauseItem.Text = 'Resume'
             $statusItem.Text = 'Status: paused'
+            $checkItem.Text = 'Last check: paused'
             Write-Log 'Paused from tray'
         } else {
             $pauseItem.Text = 'Pause'
@@ -775,7 +857,8 @@ function Start-TrayApp {
     $runNowItem.Add_Click({
         $status = Invoke-CalmPass
         $statusItem.Text = "Status: $status"
-        $lastActionItem.Text = "Last action: $script:LastActionSummary"
+        $checkItem.Text = "Last check: $script:LastCheckSummary"
+        $lastActionItem.Text = "Last action: $(Get-ShortText $script:LastActionSummary 100)"
     })
 
     $configItem = $menu.Items.Add('Open config')
@@ -809,12 +892,10 @@ function Start-TrayApp {
     $timer.Add_Tick({
         $status = Invoke-CalmPass
         $statusItem.Text = "Status: $status"
-        $lastActionItem.Text = "Last action: $script:LastActionSummary"
+        $checkItem.Text = "Last check: $script:LastCheckSummary"
+        $lastActionItem.Text = "Last action: $(Get-ShortText $script:LastActionSummary 100)"
         $tip = "$script:AppName - $status"
-        if ($tip.Length -gt 63) {
-            $tip = $tip.Substring(0, 63)
-        }
-        $notify.Text = $tip
+        $notify.Text = Get-ShortText $tip 63
     })
     $timer.Start()
 
@@ -837,6 +918,11 @@ if ($Once) {
     } finally {
         Stop-CalmKeeper 'One-time run stopped'
     }
+    return
+}
+
+if ($SelfTest) {
+    Invoke-SelfTest
     return
 }
 

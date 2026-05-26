@@ -30,6 +30,12 @@ For a one-time dry-run test:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CalmKeeper.ps1 -Once -WhatIf -NoTray
 ```
 
+For a stronger dry-run self-test that forces pressure selection without changing priorities or memory:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CalmKeeper.ps1 -SelfTest -NoTray
+```
+
 ## Start with Windows
 
 Double-click:
@@ -66,5 +72,7 @@ Useful knobs:
 This is intentionally gentle. Windows already has a scheduler and memory manager; CalmKeeper helps most when lots of background apps are open and one or two are consuming resources while you are trying to keep the active app responsive.
 
 The stricter defaults are designed to reduce stutter caused by the smoother itself: CPU actions require a real CPU delta sample, recently focused apps stay protected briefly, and memory trimming avoids processes that are actively using CPU.
+
+Logs include the action reason, for example the system CPU/RAM pressure and the selected process CPU or working set. This makes it easier to tune the config before using active mode for long sessions.
 
 No background utility can guarantee that every slowdown disappears; thermal throttling, failing disks, driver stalls, Windows Update, malware scans, and low physical RAM can still cause lag. CalmKeeper is built to reduce the common "too many background apps are open" case without making the active app worse.
