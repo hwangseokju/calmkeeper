@@ -30,11 +30,39 @@ For a one-time dry-run test:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CalmKeeper.ps1 -Once -WhatIf -NoTray
 ```
 
+To run continuously in dry-run mode without changing priorities or memory, double-click:
+
+```bat
+run-dryrun.cmd
+```
+
 For a stronger dry-run self-test that forces pressure selection without changing priorities or memory:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CalmKeeper.ps1 -SelfTest -NoTray
 ```
+
+Or double-click:
+
+```bat
+run-selftest.cmd
+```
+
+## Analyze Logs
+
+After a dry-run session, summarize what CalmKeeper would have touched:
+
+```bat
+analyze-log.cmd
+```
+
+Or run directly:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Analyze-CalmKeeperLog.ps1
+```
+
+The summary shows action counts, top selected processes, recent action reasons, skipped actions, and recent pressure status. Use this before switching from dry-run to active mode.
 
 ## Start with Windows
 
