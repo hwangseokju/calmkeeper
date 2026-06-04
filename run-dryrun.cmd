@@ -1,3 +1,3 @@
 @echo off
 set "SCRIPT_DIR=%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%CalmKeeper.ps1" -WhatIf
+start "CalmKeeper Dry Run" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SCRIPT_DIR%CalmKeeper.ps1" -WhatIf

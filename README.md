@@ -36,6 +36,8 @@ To run continuously in dry-run mode without changing priorities or memory, doubl
 run-dryrun.cmd
 ```
 
+Dry-run also runs as a tray app. On Windows 11, the tray icon may be inside the hidden icons menu; click the `^` button near the clock if you do not see it immediately.
+
 For a stronger dry-run self-test that forces pressure selection without changing priorities or memory:
 
 ```powershell
