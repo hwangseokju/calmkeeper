@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$NoTray,
     [switch]$Once,
     [switch]$WhatIf,
@@ -19,9 +19,9 @@ $script:ProcessActionAt = @{}
 $script:LastActionAt = [datetime]::MinValue
 $script:CpuCount = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS)
 $script:Paused = $false
-$script:LastStatus = 'starting'
-$script:LastCheckSummary = 'not checked yet'
-$script:LastActionSummary = 'none'
+$script:LastStatus = '시작 중'
+$script:LastCheckSummary = '아직 확인 안 함'
+$script:LastActionSummary = '없음'
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -226,7 +226,7 @@ function Read-Config {
 
         return (Normalize-Config $loaded)
     } catch {
-        Write-Log "Config read failed, using defaults: $($_.Exception.Message)"
+        Write-Log "설정 읽기 실패, 기본값 사용: $($_.Exception.Message)"
         return (Normalize-Config (Get-DefaultConfig))
     }
 }
@@ -240,18 +240,18 @@ function Install-StartupShortcut {
     $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,44"
-    $shortcut.Description = 'CalmKeeper background CPU/RAM smoother'
+    $shortcut.Description = 'CalmKeeper 백그라운드 CPU/RAM 보호 도구'
     $shortcut.Save()
-    Write-Host "Startup shortcut installed: $shortcutPath"
+    Write-Host "시작프로그램 바로가기를 등록했습니다: $shortcutPath"
 }
 
 function Uninstall-StartupShortcut {
     $shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) "$script:AppName.lnk"
     if (Test-Path $shortcutPath) {
         Remove-Item -LiteralPath $shortcutPath -Force
-        Write-Host "Startup shortcut removed: $shortcutPath"
+        Write-Host "시작프로그램 바로가기를 제거했습니다: $shortcutPath"
     } else {
-        Write-Host 'Startup shortcut was not installed.'
+        Write-Host '시작프로그램 바로가기가 등록되어 있지 않습니다.'
     }
 }
 
@@ -274,7 +274,7 @@ if (-not $Once) {
     }
 
     if (-not $mutexCreated) {
-        Write-Host 'CalmKeeper is already running.'
+        Write-Host 'CalmKeeper가 이미 실행 중입니다.'
         return
     }
 }
@@ -590,7 +590,13 @@ function Set-LastActionSummary {
         [string]$Reason = ''
     )
 
-    $summary = '{0} {1}#{2} at {3:HH:mm:ss}' -f $ActionName, $ProcessName, $ProcessId, (Get-Date)
+    $actionLabel = switch ($ActionName) {
+        'priority' { '우선순위 조정' }
+        'trim' { '메모리 정리' }
+        'restore' { '우선순위 복원' }
+        default { $ActionName }
+    }
+    $summary = '{0} {1}#{2} {3:HH:mm:ss}' -f $actionLabel, $ProcessName, $ProcessId, (Get-Date)
     if (-not [string]::IsNullOrWhiteSpace($Reason)) {
         $summary = "$summary - $Reason"
     }
@@ -629,7 +635,7 @@ function Restore-CalmPriorities {
                     $process.PriorityClass = $record.Priority
                 }
                 Write-Log "Priority restored $($process.ProcessName)#$($process.Id): $($record.Priority)"
-                Set-LastActionSummary -ActionName 'restore' -ProcessName $process.ProcessName -ProcessId $process.Id -Reason 'system cooled'
+                Set-LastActionSummary -ActionName 'restore' -ProcessName $process.ProcessName -ProcessId $process.Id -Reason '시스템이 안정 범위로 돌아옴'
                 $restored++
             }
         } catch {
@@ -645,8 +651,8 @@ function Invoke-CalmPass {
     $checkStartedAt = Get-Date
 
     if ($script:Paused) {
-        $script:LastStatus = 'paused'
-        $script:LastCheckSummary = 'paused'
+        $script:LastStatus = '일시정지'
+        $script:LastCheckSummary = '일시정지'
         return $script:LastStatus
     }
 
@@ -656,8 +662,8 @@ function Invoke-CalmPass {
     if ($null -eq $cpu -or -not $mem.IsAvailable) {
         $cpuText = if ($null -eq $cpu) { 'unknown' } else { "$cpu%" }
         $memText = if ($mem.IsAvailable) { "$($mem.LoadPercent)%" } else { 'unknown' }
-        $script:LastStatus = "sensor unavailable CPU $cpuText, RAM $memText"
-        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - sensors unavailable"
+        $script:LastStatus = "센서 사용 불가 CPU $cpuText, RAM $memText"
+        $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 센서 사용 불가"
         Write-Log $script:LastStatus
         return $script:LastStatus
     }
@@ -669,24 +675,24 @@ function Invoke-CalmPass {
 
     if ($cool) {
         $restored = Restore-CalmPriorities
-        $script:LastStatus = "cool CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $script:LastStatus = "안정 CPU $cpu%, RAM $($mem.LoadPercent)%"
         if ($restored -gt 0) {
-            $script:LastStatus += ", restored $restored"
+            $script:LastStatus += ", 복원 $restored"
         }
-        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - cool"
+        $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 안정"
         return $script:LastStatus
     }
 
     if (-not ($highCpu -or $highMem)) {
-        $script:LastStatus = "watching CPU $cpu%, RAM $($mem.LoadPercent)%"
-        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - watching"
+        $script:LastStatus = "감시 중 CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 감시 중"
         return $script:LastStatus
     }
 
     $cooldown = [int]$script:Config.actionCooldownSeconds
     if (((Get-Date) - $script:LastActionAt).TotalSeconds -lt $cooldown) {
-        $script:LastStatus = "pressure CPU $cpu%, RAM $($mem.LoadPercent)%, cooling down"
-        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - cooldown"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 대기 중"
+        $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 대기 중"
         return $script:LastStatus
     }
 
@@ -729,7 +735,7 @@ function Invoke-CalmPass {
     $actions = 0
     foreach ($item in $selectedById.Values) {
         try {
-            $priorityReason = "process CPU $($item.CpuPercent)% >= $minCpu%, system CPU $cpu%"
+            $priorityReason = "프로세스 CPU $($item.CpuPercent)% >= 기준 $minCpu%, 시스템 CPU $cpu%"
             if ($highCpu -and
                 $item.HasCpuSample -and
                 $item.CpuPercent -ge $minCpu -and
@@ -741,9 +747,9 @@ function Invoke-CalmPass {
             }
 
             $trimReason = if ($emergencyMem) {
-                "RAM $($mem.LoadPercent)% >= emergency $($script:Config.memoryEmergencyPercent)%, working set $($item.MemoryMB) MB"
+                "RAM $($mem.LoadPercent)% >= 긴급 기준 $($script:Config.memoryEmergencyPercent)%, 작업셋 $($item.MemoryMB) MB"
             } else {
-                "RAM $($mem.LoadPercent)% >= $($script:Config.memoryHighPercent)%, working set $($item.MemoryMB) MB, process CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
+                "RAM $($mem.LoadPercent)% >= 기준 $($script:Config.memoryHighPercent)%, 작업셋 $($item.MemoryMB) MB, 프로세스 CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
             }
             if ($highMem -and
                 $item.MemoryMB -ge $minMemMb -and
@@ -761,19 +767,19 @@ function Invoke-CalmPass {
 
     if ($actions -gt 0) {
         $script:LastActionAt = Get-Date
-        $script:LastStatus = "pressure CPU $cpu%, RAM $($mem.LoadPercent)%, actions $actions"
-        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - acted on $actions"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 조치 $actions"
+        $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 조치 $actions"
     } else {
-        $script:LastStatus = "pressure CPU $cpu%, RAM $($mem.LoadPercent)%, no safe candidates"
-        $script:LastCheckSummary = "checked $($checkStartedAt.ToString('HH:mm:ss')) - no safe candidates"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 안전 후보 없음"
+        $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 안전 후보 없음"
     }
     Write-Log $script:LastStatus
     return $script:LastStatus
 }
 
 function Invoke-SelfTest {
-    Write-Host "$script:AppName self-test running in dry-run mode."
-    Write-Log 'Self-test started'
+    Write-Host "$script:AppName 자가 테스트를 dry-run 모드로 실행합니다."
+    Write-Log '자가 테스트 시작'
 
     $script:DryRun = $true
     $script:Config.cpuHighPercent = 1
@@ -787,16 +793,16 @@ function Invoke-SelfTest {
     $script:Config.memoryEmergencyPercent = 1
     $script:Config.maxProcessesPerPass = 3
 
-    Write-Host 'Pass 1: warm CPU samples'
+    Write-Host '1단계: CPU 샘플 예열'
     [void](Get-ProcessSnapshot)
-    Write-Host 'samples warmed'
+    Write-Host '샘플 예열 완료'
     Start-Sleep -Seconds 2
-    Write-Host 'Pass 2: forced pressure selection'
+    Write-Host '2단계: 압박 상황 강제 선택'
     Invoke-CalmPass | Write-Host
-    Write-Host "Last check: $script:LastCheckSummary"
-    Write-Host "Last action: $script:LastActionSummary"
+    Write-Host "마지막 확인: $script:LastCheckSummary"
+    Write-Host "마지막 조치: $script:LastActionSummary"
 
-    Stop-CalmKeeper 'Self-test stopped'
+    Stop-CalmKeeper '자가 테스트 종료'
 }
 
 function Stop-CalmKeeper {
@@ -811,14 +817,14 @@ function Stop-CalmKeeper {
 }
 
 function Start-ConsoleLoop {
-    Write-Host "$script:AppName running. Press Ctrl+C to exit."
+    Write-Host "$script:AppName 실행 중입니다. 종료하려면 Ctrl+C를 누르세요."
     try {
         while ($true) {
             Invoke-CalmPass | Write-Host
             Start-Sleep -Seconds ([int]$script:Config.checkIntervalSeconds)
         }
     } finally {
-        Stop-CalmKeeper 'Console loop stopped'
+        Stop-CalmKeeper '콘솔 루프 종료'
     }
 }
 
@@ -829,44 +835,44 @@ function Start-TrayApp {
     $notify.Visible = $true
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $statusItem = $menu.Items.Add('Status: starting')
+    $statusItem = $menu.Items.Add('상태: 시작 중')
     $statusItem.Enabled = $false
-    $checkItem = $menu.Items.Add('Last check: not checked yet')
+    $checkItem = $menu.Items.Add('마지막 확인: 아직 없음')
     $checkItem.Enabled = $false
-    $modeItem = $menu.Items.Add("Mode: $(if ($script:DryRun) { 'dry-run' } else { 'active' })")
+    $modeItem = $menu.Items.Add("모드: $(if ($script:DryRun) { 'dry-run' } else { 'active' })")
     $modeItem.Enabled = $false
-    $lastActionItem = $menu.Items.Add('Last action: none')
+    $lastActionItem = $menu.Items.Add('마지막 조치: 없음')
     $lastActionItem.Enabled = $false
     [void]$menu.Items.Add('-')
 
-    $pauseItem = $menu.Items.Add('Pause')
+    $pauseItem = $menu.Items.Add('일시정지')
     $pauseItem.Add_Click({
         $script:Paused = -not $script:Paused
         if ($script:Paused) {
-            $pauseItem.Text = 'Resume'
-            $statusItem.Text = 'Status: paused'
-            $checkItem.Text = 'Last check: paused'
-            Write-Log 'Paused from tray'
+            $pauseItem.Text = '다시 시작'
+            $statusItem.Text = '상태: 일시정지'
+            $checkItem.Text = '마지막 확인: 일시정지'
+            Write-Log '트레이에서 일시정지'
         } else {
-            $pauseItem.Text = 'Pause'
-            Write-Log 'Resumed from tray'
+            $pauseItem.Text = '일시정지'
+            Write-Log '트레이에서 다시 시작'
         }
     })
 
-    $runNowItem = $menu.Items.Add('Check now')
+    $runNowItem = $menu.Items.Add('지금 확인')
     $runNowItem.Add_Click({
         $status = Invoke-CalmPass
-        $statusItem.Text = "Status: $status"
-        $checkItem.Text = "Last check: $script:LastCheckSummary"
-        $lastActionItem.Text = "Last action: $(Get-ShortText $script:LastActionSummary 100)"
+        $statusItem.Text = "상태: $status"
+        $checkItem.Text = "마지막 확인: $script:LastCheckSummary"
+        $lastActionItem.Text = "마지막 조치: $(Get-ShortText $script:LastActionSummary 100)"
     })
 
-    $configItem = $menu.Items.Add('Open config')
+    $configItem = $menu.Items.Add('설정 열기')
     $configItem.Add_Click({
         Start-Process notepad.exe -ArgumentList "`"$ConfigPath`""
     })
 
-    $logItem = $menu.Items.Add('Open log')
+    $logItem = $menu.Items.Add('로그 열기')
     $logItem.Add_Click({
         if (-not (Test-Path $script:LogPath)) {
             New-Item -ItemType File -Path $script:LogPath -Force | Out-Null
@@ -875,35 +881,35 @@ function Start-TrayApp {
     })
 
     [void]$menu.Items.Add('-')
-    $exitItem = $menu.Items.Add('Exit')
+    $exitItem = $menu.Items.Add('종료')
     $exitItem.Add_Click({
-        Write-Log 'Exiting from tray'
-        Stop-CalmKeeper 'Tray exit'
+        Write-Log '트레이에서 종료'
+        Stop-CalmKeeper '트레이 종료'
         [System.Windows.Forms.Application]::Exit()
     })
 
     $notify.ContextMenuStrip = $menu
     $notify.BalloonTipTitle = $script:AppName
-    $notify.BalloonTipText = 'CPU/RAM smoother is running.'
+    $notify.BalloonTipText = 'CPU/RAM 보호 도구가 실행 중입니다.'
     $notify.ShowBalloonTip(1500)
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
     $timer.Add_Tick({
         $status = Invoke-CalmPass
-        $statusItem.Text = "Status: $status"
-        $checkItem.Text = "Last check: $script:LastCheckSummary"
-        $lastActionItem.Text = "Last action: $(Get-ShortText $script:LastActionSummary 100)"
+        $statusItem.Text = "상태: $status"
+        $checkItem.Text = "마지막 확인: $script:LastCheckSummary"
+        $lastActionItem.Text = "마지막 조치: $(Get-ShortText $script:LastActionSummary 100)"
         $tip = "$script:AppName - $status"
         $notify.Text = Get-ShortText $tip 63
     })
     $timer.Start()
 
-    Write-Log "Tray app started. DryRun=$script:DryRun"
+    Write-Log "트레이 앱 시작. DryRun=$script:DryRun"
     try {
         [System.Windows.Forms.Application]::Run()
     } finally {
-        Stop-CalmKeeper 'Tray app stopped'
+        Stop-CalmKeeper '트레이 앱 종료'
         $notify.Visible = $false
         $notify.Dispose()
     }
@@ -916,7 +922,7 @@ if ($Once) {
     try {
         Invoke-CalmPass | Write-Host
     } finally {
-        Stop-CalmKeeper 'One-time run stopped'
+        Stop-CalmKeeper '1회 실행 종료'
     }
     return
 }
@@ -931,3 +937,4 @@ if ($NoTray) {
 } else {
     Start-TrayApp
 }
+
