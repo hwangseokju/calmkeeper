@@ -236,8 +236,9 @@ function Install-StartupShortcut {
     $shortcutPath = Join-Path $startup "$script:AppName.lnk"
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""
+    $vbsPath = Join-Path $PSScriptRoot 'Start-CalmKeeper.vbs'
+    $shortcut.TargetPath = "$env:WINDIR\System32\wscript.exe"
+    $shortcut.Arguments = "`"$vbsPath`""
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,44"
     $shortcut.Description = 'CalmKeeper 백그라운드 CPU/RAM 보호 도구'
