@@ -106,6 +106,14 @@ calmkeeper.config.json
 - `protectedProcessNames`: 절대 건드리지 않을 프로세스 목록
 - `dryRun`: `true`면 실제 변경 없이 로그만 남김
 
+현재 기본값은 버벅임 방지를 우선해서 보수적으로 잡혀 있습니다.
+
+- RAM 조치는 88% 이상부터 시작
+- 최근 사용 앱 이름은 5분 동안 보호
+- 같은 프로세스는 기본 10분 동안 반복 조치하지 않음
+- Chrome, Edge, Claude, ChatGPT, OneDrive, KakaoTalk, Telegram 같은 인터랙티브 앱은 기본 보호 목록에 포함
+- 상태 로그는 기본 60초 간격으로 제한해 로그 폭주를 줄임
+
 ## 역할 분리
 
 CalmKeeper가 맡는 일:

@@ -51,6 +51,16 @@ foreach ($line in $lines) {
         $message = $matches[2]
     }
 
+    if ($message -match 'skipped\s+(.+?)#(\d+):\s+(.+)$') {
+        $skipRows.Add([pscustomobject]@{
+            Time = $timestamp
+            Process = $matches[1]
+            Pid = [int]$matches[2]
+            Reason = $matches[3]
+        })
+        continue
+    }
+
     if ($message -match '^Priority restored\s+(.+?)#(\d+):\s+(.+)$') {
         $restoreRows.Add([pscustomobject]@{
             Time = $timestamp
@@ -69,16 +79,6 @@ foreach ($line in $lines) {
             Pid = [int]$matches[3]
             Detail = $matches[4]
             Reason = $matches[5]
-        })
-        continue
-    }
-
-    if ($message -match 'skipped\s+(.+?)#(\d+):\s+(.+)$') {
-        $skipRows.Add([pscustomobject]@{
-            Time = $timestamp
-            Process = $matches[1]
-            Pid = [int]$matches[2]
-            Reason = $matches[3]
         })
         continue
     }
@@ -149,4 +149,5 @@ if ($ShowRecent) {
     Write-Host '최근 원본 로그:'
     $lines | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
 }
+
 

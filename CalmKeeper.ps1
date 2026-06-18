@@ -17,6 +17,8 @@ $script:RecentForegroundPids = @{}
 $script:RecentForegroundNames = @{}
 $script:ProcessActionAt = @{}
 $script:LastActionAt = [datetime]::MinValue
+$script:LastStatusLogAt = [datetime]::MinValue
+$script:LastStatusLogMessage = ''
 $script:CpuCount = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS)
 $script:Paused = $false
 $script:LastStatus = '시작 중'
@@ -75,17 +77,17 @@ function Get-DefaultConfig {
     [pscustomobject]@{
         checkIntervalSeconds = 5
         cpuHighPercent = 85
-        memoryHighPercent = 82
+        memoryHighPercent = 88
         cpuCoolPercent = 55
-        memoryCoolPercent = 70
+        memoryCoolPercent = 78
         actionCooldownSeconds = 20
-        perProcessActionCooldownSeconds = 120
-        foregroundGraceSeconds = 30
+        perProcessActionCooldownSeconds = 600
+        foregroundGraceSeconds = 300
         minimumProcessMemoryMB = 250
         minimumProcessCpuPercent = 3
         maxCpuPercentForMemoryTrim = 2
         memoryEmergencyPercent = 92
-        maxProcessesPerPass = 5
+        maxProcessesPerPass = 3
         lowerPriority = $true
         trimWorkingSet = $true
         restorePriorities = $true
@@ -105,8 +107,12 @@ function Get-DefaultConfig {
             'Memory Compression', 'MsMpEng', 'NisSrv',
             'SecurityHealthService', 'SecurityHealthSystray', 'SecurityHealthHost',
             'powershell', 'powershell_ise', 'pwsh', 'cmd', 'conhost',
-            'Code', 'devenv', 'Codex'
+            'vmmem', 'vmmemWSL',
+            'Code', 'devenv', 'Codex', 'Cursor',
+            'chrome', 'msedge', 'claude', 'ChatGPT',
+            'KakaoTalk', 'Telegram', 'OneDrive'
         )
+        statusLogIntervalSeconds = 60
         logRetentionLines = 1000
     }
 }
@@ -176,6 +182,7 @@ function Normalize-Config {
     $Config.dryRun = [bool]$Config.dryRun
     $Config.protectForegroundProcess = [bool]$Config.protectForegroundProcess
     $Config.protectForegroundProcessName = [bool]$Config.protectForegroundProcessName
+    $Config.statusLogIntervalSeconds = Get-ClampedInt $Config.statusLogIntervalSeconds $default.statusLogIntervalSeconds 5 3600
     $Config.logRetentionLines = Get-ClampedInt $Config.logRetentionLines $default.logRetentionLines 0 100000
 
     if ($null -eq $Config.protectedProcessNames) {
@@ -204,6 +211,20 @@ function Write-Log {
         }
     } catch {
         Write-Verbose $line
+    }
+}
+
+function Write-StatusLog {
+    param([string]$Message)
+
+    $interval = [int]$script:Config.statusLogIntervalSeconds
+    $now = Get-Date
+
+    if ($Message -ne $script:LastStatusLogMessage -or
+        ($now - $script:LastStatusLogAt).TotalSeconds -ge $interval) {
+        Write-Log $Message
+        $script:LastStatusLogMessage = $Message
+        $script:LastStatusLogAt = $now
     }
 }
 
@@ -665,7 +686,7 @@ function Invoke-CalmPass {
         $memText = if ($mem.IsAvailable) { "$($mem.LoadPercent)%" } else { 'unknown' }
         $script:LastStatus = "센서 사용 불가 CPU $cpuText, RAM $memText"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 센서 사용 불가"
-        Write-Log $script:LastStatus
+        Write-StatusLog $script:LastStatus
         return $script:LastStatus
     }
 
@@ -774,7 +795,7 @@ function Invoke-CalmPass {
         $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 안전 후보 없음"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 안전 후보 없음"
     }
-    Write-Log $script:LastStatus
+    Write-StatusLog $script:LastStatus
     return $script:LastStatus
 }
 
@@ -938,4 +959,5 @@ if ($NoTray) {
 } else {
     Start-TrayApp
 }
+
 
