@@ -86,6 +86,9 @@ function Get-DefaultConfig {
         minimumProcessMemoryMB = 250
         minimumProcessCpuPercent = 3
         maxCpuPercentForMemoryTrim = 2
+        requirePagingForMemoryTrim = $true
+        memoryPagesPerSecHigh = 25
+        minimumAvailableMemoryMB = 1536
         memoryEmergencyPercent = 92
         maxProcessesPerPass = 3
         lowerPriority = $true
@@ -174,6 +177,9 @@ function Normalize-Config {
     $Config.minimumProcessMemoryMB = Get-ClampedInt $Config.minimumProcessMemoryMB $default.minimumProcessMemoryMB 1 1048576
     $Config.minimumProcessCpuPercent = Get-ClampedDouble $Config.minimumProcessCpuPercent $default.minimumProcessCpuPercent 0 100
     $Config.maxCpuPercentForMemoryTrim = Get-ClampedDouble $Config.maxCpuPercentForMemoryTrim $default.maxCpuPercentForMemoryTrim 0 100
+    $Config.requirePagingForMemoryTrim = [bool]$Config.requirePagingForMemoryTrim
+    $Config.memoryPagesPerSecHigh = Get-ClampedDouble $Config.memoryPagesPerSecHigh $default.memoryPagesPerSecHigh 0 10000
+    $Config.minimumAvailableMemoryMB = Get-ClampedInt $Config.minimumAvailableMemoryMB $default.minimumAvailableMemoryMB 128 1048576
     $Config.memoryEmergencyPercent = Get-ClampedDouble $Config.memoryEmergencyPercent $default.memoryEmergencyPercent 1 100
     $Config.maxProcessesPerPass = Get-ClampedInt $Config.maxProcessesPerPass $default.maxProcessesPerPass 1 100
     $Config.lowerPriority = [bool]$Config.lowerPriority
@@ -342,6 +348,7 @@ function Get-SystemMemoryStatus {
                 LoadPercent = [int]$mem.dwMemoryLoad
                 UsedGB = [Math]::Round($used / 1GB, 2)
                 TotalGB = [Math]::Round($mem.ullTotalPhys / 1GB, 2)
+                AvailableMB = [Math]::Round($mem.ullAvailPhys / 1MB, 0)
                 AvailableGB = [Math]::Round($mem.ullAvailPhys / 1GB, 2)
             }
         }
@@ -354,7 +361,19 @@ function Get-SystemMemoryStatus {
         LoadPercent = 0
         UsedGB = 0
         TotalGB = 0
+        AvailableMB = 0
         AvailableGB = 0
+    }
+}
+
+function Get-MemoryPagesPerSec {
+    try {
+        $counter = Get-Counter '\Memory\Pages/sec' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop
+        $sample = $counter.CounterSamples | Select-Object -First 1
+        return [Math]::Round([double]$sample.CookedValue, 1)
+    } catch {
+        Write-Log "메모리 Pages/sec 확인 실패: $($_.Exception.Message)"
+        return $null
     }
 }
 
@@ -680,6 +699,7 @@ function Invoke-CalmPass {
 
     $cpu = Get-SystemCpuPercent
     $mem = Get-SystemMemoryStatus
+    $pagesPerSec = Get-MemoryPagesPerSec
 
     if ($null -eq $cpu -or -not $mem.IsAvailable) {
         $cpuText = if ($null -eq $cpu) { 'unknown' } else { "$cpu%" }
@@ -691,13 +711,24 @@ function Invoke-CalmPass {
     }
 
     $highCpu = $cpu -ge [double]$script:Config.cpuHighPercent
-    $highMem = $mem.LoadPercent -ge [double]$script:Config.memoryHighPercent
+    $rawHighMem = $mem.LoadPercent -ge [double]$script:Config.memoryHighPercent
+    $emergencyMem = $mem.LoadPercent -ge [double]$script:Config.memoryEmergencyPercent
+    $pagingHigh = ($null -ne $pagesPerSec) -and ($pagesPerSec -ge [double]$script:Config.memoryPagesPerSecHigh)
+    $availableLow = $mem.AvailableMB -le [double]$script:Config.minimumAvailableMemoryMB
+    $highMem = $emergencyMem -or (
+        $rawHighMem -and
+        (
+            -not [bool]$script:Config.requirePagingForMemoryTrim -or
+            $pagingHigh -or
+            $availableLow
+        )
+    )
     $cool = ($cpu -le [double]$script:Config.cpuCoolPercent) -and
         ($mem.LoadPercent -le [double]$script:Config.memoryCoolPercent)
 
     if ($cool) {
         $restored = Restore-CalmPriorities
-        $script:LastStatus = "안정 CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $script:LastStatus = "안정 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec"
         if ($restored -gt 0) {
             $script:LastStatus += ", 복원 $restored"
         }
@@ -706,14 +737,15 @@ function Invoke-CalmPass {
     }
 
     if (-not ($highCpu -or $highMem)) {
-        $script:LastStatus = "감시 중 CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $memNote = if ($rawHighMem -and -not $highMem) { ', RAM 높지만 페이징/가용메모리 정상' } else { '' }
+        $script:LastStatus = "감시 중 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec$memNote"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 감시 중"
         return $script:LastStatus
     }
 
     $cooldown = [int]$script:Config.actionCooldownSeconds
     if (((Get-Date) - $script:LastActionAt).TotalSeconds -lt $cooldown) {
-        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 대기 중"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec, 대기 중"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 대기 중"
         return $script:LastStatus
     }
@@ -724,7 +756,6 @@ function Invoke-CalmPass {
     $minMemMb = [double]$script:Config.minimumProcessMemoryMB
     $minCpu = [double]$script:Config.minimumProcessCpuPercent
     $maxCpuForTrim = [double]$script:Config.maxCpuPercentForMemoryTrim
-    $emergencyMem = $mem.LoadPercent -ge [double]$script:Config.memoryEmergencyPercent
 
     if ($highCpu) {
         $cpuSelected = $candidates |
@@ -769,9 +800,9 @@ function Invoke-CalmPass {
             }
 
             $trimReason = if ($emergencyMem) {
-                "RAM $($mem.LoadPercent)% >= 긴급 기준 $($script:Config.memoryEmergencyPercent)%, 작업셋 $($item.MemoryMB) MB"
+                "RAM $($mem.LoadPercent)% >= 긴급 기준 $($script:Config.memoryEmergencyPercent)%, Pg/s $pagesPerSec, 가용 $($mem.AvailableMB) MB, 작업셋 $($item.MemoryMB) MB"
             } else {
-                "RAM $($mem.LoadPercent)% >= 기준 $($script:Config.memoryHighPercent)%, 작업셋 $($item.MemoryMB) MB, 프로세스 CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
+                "RAM $($mem.LoadPercent)% >= 기준 $($script:Config.memoryHighPercent)%, Pg/s $pagesPerSec, 가용 $($mem.AvailableMB) MB, 작업셋 $($item.MemoryMB) MB, 프로세스 CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
             }
             if ($highMem -and
                 $item.MemoryMB -ge $minMemMb -and
@@ -789,10 +820,10 @@ function Invoke-CalmPass {
 
     if ($actions -gt 0) {
         $script:LastActionAt = Get-Date
-        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 조치 $actions"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec, 조치 $actions"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 조치 $actions"
     } else {
-        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 안전 후보 없음"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec, 안전 후보 없음"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 안전 후보 없음"
     }
     Write-StatusLog $script:LastStatus
@@ -812,6 +843,9 @@ function Invoke-SelfTest {
     $script:Config.perProcessActionCooldownSeconds = 0
     $script:Config.minimumProcessMemoryMB = 1
     $script:Config.minimumProcessCpuPercent = 0
+    $script:Config.requirePagingForMemoryTrim = $false
+    $script:Config.memoryPagesPerSecHigh = 0
+    $script:Config.minimumAvailableMemoryMB = 1048576
     $script:Config.memoryEmergencyPercent = 1
     $script:Config.maxProcessesPerPass = 3
 
@@ -959,5 +993,6 @@ if ($NoTray) {
 } else {
     Start-TrayApp
 }
+
 
 

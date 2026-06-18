@@ -101,6 +101,9 @@ calmkeeper.config.json
 - `foregroundGraceSeconds`: 최근 사용한 앱을 보호하는 시간
 - `perProcessActionCooldownSeconds`: 같은 프로세스를 반복해서 건드리지 않는 시간
 - `maxCpuPercentForMemoryTrim`: CPU를 쓰는 중인 프로세스는 메모리 정리에서 보호하는 기준
+- `requirePagingForMemoryTrim`: RAM 사용률만 높을 때는 정리하지 않고 실제 페이징/가용 메모리 부족을 함께 확인
+- `memoryPagesPerSecHigh`: 메모리 페이징이 높다고 볼 기준
+- `minimumAvailableMemoryMB`: 사용 가능 메모리가 이 값보다 낮으면 RAM 압박으로 판단
 - `memoryEmergencyPercent`: RAM 긴급 상태 기준
 - `protectForegroundProcessName`: 최근 사용한 앱과 같은 이름의 helper 프로세스도 보호
 - `protectedProcessNames`: 절대 건드리지 않을 프로세스 목록
@@ -109,6 +112,7 @@ calmkeeper.config.json
 현재 기본값은 버벅임 방지를 우선해서 보수적으로 잡혀 있습니다.
 
 - RAM 조치는 88% 이상부터 시작
+- RAM이 높아도 Pages/sec와 사용 가능 메모리가 정상이라면 작업셋 정리를 하지 않음
 - 최근 사용 앱 이름은 5분 동안 보호
 - 같은 프로세스는 기본 10분 동안 반복 조치하지 않음
 - Chrome, Edge, Claude, ChatGPT, OneDrive, KakaoTalk, Telegram 같은 인터랙티브 앱은 기본 보호 목록에 포함
