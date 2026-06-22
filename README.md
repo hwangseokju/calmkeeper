@@ -44,7 +44,7 @@ run-selftest.cmd
 
 ## 트레이 메뉴
 
-트레이 아이콘을 우클릭하면 메뉴가 열립니다. 아이콘을 더블클릭하면 로그가 열립니다.
+트레이 아이콘을 우클릭하면 메뉴가 열립니다. 아이콘을 **더블클릭**하면 로그가 바로 열립니다.
 
 | 항목 | 설명 |
 |------|------|
@@ -73,7 +73,7 @@ run-selftest.cmd
 
 분으로 환산하면 약 **0.08분마다**입니다. 너무 짧게 줄이면 CalmKeeper 자체가 부담이 될 수 있으니 5초 아래로 낮추는 것은 추천하지 않습니다.
 
-설정 파일을 저장하면 재시작 없이 자동으로 반영됩니다.
+설정 파일을 저장하면 다음 체크 주기에 자동으로 반영됩니다. CalmKeeper를 재시작하지 않아도 됩니다.
 
 ## 로그 분석
 
@@ -123,18 +123,33 @@ calmkeeper.config.json
 |------|--------|------|
 | `checkIntervalSeconds` | `5` | 확인 주기(초). 5 미만 비권장 |
 | `cpuHighPercent` | `85` | CPU 압박 기준 |
-| `memoryHighPercent` | `82` | RAM 압박 기준 |
+| `memoryHighPercent` | `88` | RAM 압박 기준 |
 | `cpuCoolPercent` | `55` | CPU 안정 복원 기준 |
-| `memoryCoolPercent` | `70` | RAM 안정 복원 기준 |
-| `foregroundGraceSeconds` | `30` | 최근 사용한 앱 보호 시간(초) |
-| `perProcessActionCooldownSeconds` | `120` | 같은 프로세스 반복 조치 방지 시간(초) |
+| `memoryCoolPercent` | `78` | RAM 안정 복원 기준 |
+| `foregroundGraceSeconds` | `300` | 최근 사용한 앱 보호 시간(초) |
+| `perProcessActionCooldownSeconds` | `600` | 같은 프로세스 반복 조치 방지 시간(초) |
 | `maxCpuPercentForMemoryTrim` | `2` | 메모리 정리 대상에서 제외할 CPU 사용 기준 |
+| `requirePagingForMemoryTrim` | `true` | RAM 사용률만 높을 때는 정리하지 않고 실제 페이징/가용 메모리 부족을 함께 확인 |
+| `memoryPagesPerSecHigh` | `25` | 메모리 페이징이 높다고 볼 기준 |
+| `minimumAvailableMemoryMB` | `1536` | 사용 가능 메모리가 이 값보다 낮으면 RAM 압박으로 판단 |
 | `memoryEmergencyPercent` | `92` | RAM 긴급 기준 (CPU 사용 중 프로세스도 정리) |
 | `protectForegroundProcessName` | `true` | 최근 사용 앱과 같은 이름의 helper도 보호 |
+| `protectForegroundChildren` | `true` | 포그라운드 앱의 자식 프로세스(렌더러, 언어 서버 등)도 보호 |
+| `foregroundChildrenDepth` | `4` | 자식 보호 시 조상을 몇 단계까지 올라갈지 |
 | `protectedProcessNames` | *(목록)* | 절대 건드리지 않을 프로세스 이름 목록 |
 | `dryRun` | `false` | `true`면 실제 변경 없이 로그만 남김 |
 | `notifyOnAction` | `true` | 조치 발생 시 트레이 풍선 알림 표시 |
+| `statusLogIntervalSeconds` | `60` | 상태 로그 최소 간격(초). 로그 폭주 방지 |
 | `logRetentionLines` | `1000` | 로그 최대 보관 줄 수 |
+
+현재 기본값은 버벅임 방지를 우선해서 보수적으로 잡혀 있습니다.
+
+- RAM 조치는 88% 이상부터 시작
+- RAM이 높아도 Pages/sec와 사용 가능 메모리가 정상이라면 작업셋 정리를 하지 않음
+- 최근 사용 앱 이름은 5분 동안 보호
+- 같은 프로세스는 기본 10분 동안 반복 조치하지 않음
+- Chrome, Edge, Claude, ChatGPT, OneDrive, KakaoTalk, Telegram 같은 인터랙티브 앱은 기본 보호 목록에 포함
+- 상태 로그는 기본 60초 간격으로 제한해 로그 폭주를 줄임
 
 ## 역할 분리
 

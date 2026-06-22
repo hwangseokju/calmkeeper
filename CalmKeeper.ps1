@@ -17,17 +17,18 @@ $script:RecentForegroundPids = @{}
 $script:RecentForegroundNames = @{}
 $script:ProcessActionAt = @{}
 $script:LastActionAt = [datetime]::MinValue
+$script:LastStatusLogAt = [datetime]::MinValue
+$script:LastStatusLogMessage = ''
 $script:CpuCount = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS)
 $script:Paused = $false
 $script:LastStatus = '시작 중'
 $script:LastCheckSummary = '아직 확인 안 함'
 $script:LastActionSummary = '없음'
+$script:ConfigLastWriteTime = $null
+$script:ConfigIntervalChanged = $false
 $script:TotalActions = 0
 $script:LastNotifiedActionCount = 0
 $script:TrayNotify = $null
-$script:ConfigChangedFlag = $false
-$script:ConfigChangedAt = [datetime]::MinValue
-$script:TrayTimer = $null
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -81,17 +82,20 @@ function Get-DefaultConfig {
     [pscustomobject]@{
         checkIntervalSeconds = 5
         cpuHighPercent = 85
-        memoryHighPercent = 82
+        memoryHighPercent = 88
         cpuCoolPercent = 55
-        memoryCoolPercent = 70
+        memoryCoolPercent = 78
         actionCooldownSeconds = 20
-        perProcessActionCooldownSeconds = 120
-        foregroundGraceSeconds = 30
+        perProcessActionCooldownSeconds = 600
+        foregroundGraceSeconds = 300
         minimumProcessMemoryMB = 250
         minimumProcessCpuPercent = 3
         maxCpuPercentForMemoryTrim = 2
+        requirePagingForMemoryTrim = $true
+        memoryPagesPerSecHigh = 25
+        minimumAvailableMemoryMB = 1536
         memoryEmergencyPercent = 92
-        maxProcessesPerPass = 5
+        maxProcessesPerPass = 3
         lowerPriority = $true
         trimWorkingSet = $true
         restorePriorities = $true
@@ -111,10 +115,17 @@ function Get-DefaultConfig {
             'Memory Compression', 'MsMpEng', 'NisSrv',
             'SecurityHealthService', 'SecurityHealthSystray', 'SecurityHealthHost',
             'powershell', 'powershell_ise', 'pwsh', 'cmd', 'conhost',
-            'Code', 'devenv', 'Codex'
+            'vmmem', 'vmmemWSL',
+            'Code', 'devenv', 'Codex', 'Cursor',
+            'chrome', 'msedge', 'claude', 'ChatGPT',
+            'KakaoTalk', 'Telegram', 'OneDrive',
+            'lsaiso', 'hvhost', 'wslhost', 'wslservice'
         )
+        statusLogIntervalSeconds = 60
         logRetentionLines = 1000
         notifyOnAction = $true
+        protectForegroundChildren = $true
+        foregroundChildrenDepth = 4
     }
 }
 
@@ -175,6 +186,9 @@ function Normalize-Config {
     $Config.minimumProcessMemoryMB = Get-ClampedInt $Config.minimumProcessMemoryMB $default.minimumProcessMemoryMB 1 1048576
     $Config.minimumProcessCpuPercent = Get-ClampedDouble $Config.minimumProcessCpuPercent $default.minimumProcessCpuPercent 0 100
     $Config.maxCpuPercentForMemoryTrim = Get-ClampedDouble $Config.maxCpuPercentForMemoryTrim $default.maxCpuPercentForMemoryTrim 0 100
+    $Config.requirePagingForMemoryTrim = [bool]$Config.requirePagingForMemoryTrim
+    $Config.memoryPagesPerSecHigh = Get-ClampedDouble $Config.memoryPagesPerSecHigh $default.memoryPagesPerSecHigh 0 10000
+    $Config.minimumAvailableMemoryMB = Get-ClampedInt $Config.minimumAvailableMemoryMB $default.minimumAvailableMemoryMB 128 1048576
     $Config.memoryEmergencyPercent = Get-ClampedDouble $Config.memoryEmergencyPercent $default.memoryEmergencyPercent 1 100
     $Config.maxProcessesPerPass = Get-ClampedInt $Config.maxProcessesPerPass $default.maxProcessesPerPass 1 100
     $Config.lowerPriority = [bool]$Config.lowerPriority
@@ -183,8 +197,11 @@ function Normalize-Config {
     $Config.dryRun = [bool]$Config.dryRun
     $Config.protectForegroundProcess = [bool]$Config.protectForegroundProcess
     $Config.protectForegroundProcessName = [bool]$Config.protectForegroundProcessName
+    $Config.statusLogIntervalSeconds = Get-ClampedInt $Config.statusLogIntervalSeconds $default.statusLogIntervalSeconds 5 3600
     $Config.logRetentionLines = Get-ClampedInt $Config.logRetentionLines $default.logRetentionLines 0 100000
     $Config.notifyOnAction = [bool]$Config.notifyOnAction
+    $Config.protectForegroundChildren = [bool]$Config.protectForegroundChildren
+    $Config.foregroundChildrenDepth = Get-ClampedInt $Config.foregroundChildrenDepth $default.foregroundChildrenDepth 1 10
 
     if ($null -eq $Config.protectedProcessNames) {
         $Config.protectedProcessNames = $default.protectedProcessNames
@@ -215,10 +232,26 @@ function Write-Log {
     }
 }
 
+function Write-StatusLog {
+    param([string]$Message)
+
+    $interval = [int]$script:Config.statusLogIntervalSeconds
+    $now = Get-Date
+
+    if ($Message -ne $script:LastStatusLogMessage -or
+        ($now - $script:LastStatusLogAt).TotalSeconds -ge $interval) {
+        Write-Log $Message
+        $script:LastStatusLogMessage = $Message
+        $script:LastStatusLogAt = $now
+    }
+}
+
 function Read-Config {
     if (-not (Test-Path $ConfigPath)) {
         $default = Get-DefaultConfig
         $default | ConvertTo-Json -Depth 4 | Set-Content -Path $ConfigPath -Encoding UTF8
+        $item = Get-Item $ConfigPath -ErrorAction SilentlyContinue
+        if ($item) { $script:ConfigLastWriteTime = $item.LastWriteTime }
         return (Normalize-Config $default)
     }
 
@@ -232,34 +265,12 @@ function Read-Config {
             }
         }
 
+        $item = Get-Item $ConfigPath -ErrorAction SilentlyContinue
+        if ($item) { $script:ConfigLastWriteTime = $item.LastWriteTime }
         return (Normalize-Config $loaded)
     } catch {
         Write-Log "설정 읽기 실패, 기본값 사용: $($_.Exception.Message)"
         return (Normalize-Config (Get-DefaultConfig))
-    }
-}
-
-function Test-StartupShortcut {
-    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) "$script:AppName.lnk"
-    return (Test-Path $shortcutPath)
-}
-
-function Invoke-ConfigReload {
-    try {
-        $newConfig = Read-Config
-        $script:Config = $newConfig
-        $script:DryRun = [bool]($WhatIf -or $script:Config.dryRun)
-        if ($script:TrayTimer) {
-            $script:TrayTimer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
-        }
-        Write-Log "설정 다시 읽음"
-        if ($script:TrayNotify) {
-            $script:TrayNotify.BalloonTipTitle = $script:AppName
-            $script:TrayNotify.BalloonTipText = '설정을 다시 읽었습니다.'
-            $script:TrayNotify.ShowBalloonTip(2000)
-        }
-    } catch {
-        Write-Log "설정 다시 읽기 실패: $($_.Exception.Message)"
     }
 }
 
@@ -353,6 +364,7 @@ function Get-SystemMemoryStatus {
                 LoadPercent = [int]$mem.dwMemoryLoad
                 UsedGB = [Math]::Round($used / 1GB, 2)
                 TotalGB = [Math]::Round($mem.ullTotalPhys / 1GB, 2)
+                AvailableMB = [Math]::Round($mem.ullAvailPhys / 1MB, 0)
                 AvailableGB = [Math]::Round($mem.ullAvailPhys / 1GB, 2)
             }
         }
@@ -365,7 +377,19 @@ function Get-SystemMemoryStatus {
         LoadPercent = 0
         UsedGB = 0
         TotalGB = 0
+        AvailableMB = 0
         AvailableGB = 0
+    }
+}
+
+function Get-MemoryPagesPerSec {
+    try {
+        $counter = Get-Counter '\Memory\Pages/sec' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop
+        $sample = $counter.CounterSamples | Select-Object -First 1
+        return [Math]::Round([double]$sample.CookedValue, 1)
+    } catch {
+        Write-Log "메모리 Pages/sec 확인 실패: $($_.Exception.Message)"
+        return $null
     }
 }
 
@@ -459,6 +483,38 @@ function Get-ProtectedNameSet {
     return $set
 }
 
+function Get-ParentPidMap {
+    $map = @{}
+    try {
+        foreach ($p in (Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)) {
+            $map[[int]$p.ProcessId] = [int]$p.ParentProcessId
+        }
+    } catch {
+        Write-Log "Parent PID map failed: $($_.Exception.Message)"
+    }
+    return $map
+}
+
+function Test-ChildOfForeground {
+    param(
+        [int]$ProcessId,
+        [hashtable]$ParentMap,
+        [int]$MaxDepth
+    )
+
+    $current = $ProcessId
+    for ($i = 0; $i -lt $MaxDepth; $i++) {
+        if (-not $ParentMap.ContainsKey($current)) { break }
+        $parent = $ParentMap[$current]
+        if ($parent -le 4) { break }
+        if ($script:RecentForegroundPids.ContainsKey($parent)) {
+            return $true
+        }
+        $current = $parent
+    }
+    return $false
+}
+
 function Get-ProcessSnapshot {
     $now = Get-Date
     [void](Get-ForegroundProcessId)
@@ -466,6 +522,15 @@ function Get-ProcessSnapshot {
     $minMemBytes = [int64]$script:Config.minimumProcessMemoryMB * 1MB
     $minCpu = [double]$script:Config.minimumProcessCpuPercent
     $items = New-Object System.Collections.Generic.List[object]
+
+    $parentMap = $null
+    $checkChildren = [bool]$script:Config.protectForegroundChildren -and
+        [bool]$script:Config.protectForegroundProcess -and
+        $script:RecentForegroundPids.Count -gt 0
+    if ($checkChildren) {
+        $parentMap = Get-ParentPidMap
+    }
+    $childDepth = [int]$script:Config.foregroundChildrenDepth
 
     foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
         try {
@@ -476,6 +541,9 @@ function Get-ProcessSnapshot {
                 continue
             }
             if (Test-ForegroundProtectedName -ProcessName $process.ProcessName) {
+                continue
+            }
+            if ($checkChildren -and $parentMap -and (Test-ChildOfForeground -ProcessId $process.Id -ParentMap $parentMap -MaxDepth $childDepth)) {
                 continue
             }
             if ($protected.Contains($process.ProcessName)) {
@@ -680,7 +748,46 @@ function Restore-CalmPriorities {
     return $restored
 }
 
+function Test-ConfigChanged {
+    try {
+        if (-not (Test-Path $ConfigPath)) { return $false }
+        $item = Get-Item $ConfigPath -ErrorAction SilentlyContinue
+        if (-not $item) { return $false }
+        if ($null -eq $script:ConfigLastWriteTime) {
+            $script:ConfigLastWriteTime = $item.LastWriteTime
+            return $false
+        }
+        if ($item.LastWriteTime -ne $script:ConfigLastWriteTime) {
+            $script:ConfigLastWriteTime = $item.LastWriteTime
+            return $true
+        }
+    } catch {}
+    return $false
+}
+
+function Test-StartupShortcut {
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) "$script:AppName.lnk"
+    return (Test-Path $shortcutPath)
+}
+
+function Invoke-ConfigReload {
+    $oldInterval = [int]$script:Config.checkIntervalSeconds
+    $newConfig = Read-Config
+    $script:Config = $newConfig
+    $script:DryRun = [bool]($WhatIf -or $script:Config.dryRun)
+    $script:ConfigIntervalChanged = ([int]$script:Config.checkIntervalSeconds -ne $oldInterval)
+    Write-Log "설정 다시 읽음. DryRun=$script:DryRun"
+    if ($script:TrayNotify) {
+        $script:TrayNotify.BalloonTipTitle = $script:AppName
+        $script:TrayNotify.BalloonTipText = '설정을 다시 읽었습니다.'
+        $script:TrayNotify.ShowBalloonTip(2000)
+    }
+}
+
 function Invoke-CalmPass {
+    if (Test-ConfigChanged) {
+        Invoke-ConfigReload
+    }
     $checkStartedAt = Get-Date
 
     if ($script:Paused) {
@@ -691,24 +798,36 @@ function Invoke-CalmPass {
 
     $cpu = Get-SystemCpuPercent
     $mem = Get-SystemMemoryStatus
+    $pagesPerSec = Get-MemoryPagesPerSec
 
     if ($null -eq $cpu -or -not $mem.IsAvailable) {
         $cpuText = if ($null -eq $cpu) { 'unknown' } else { "$cpu%" }
         $memText = if ($mem.IsAvailable) { "$($mem.LoadPercent)%" } else { 'unknown' }
         $script:LastStatus = "센서 사용 불가 CPU $cpuText, RAM $memText"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 센서 사용 불가"
-        Write-Log $script:LastStatus
+        Write-StatusLog $script:LastStatus
         return $script:LastStatus
     }
 
     $highCpu = $cpu -ge [double]$script:Config.cpuHighPercent
-    $highMem = $mem.LoadPercent -ge [double]$script:Config.memoryHighPercent
+    $rawHighMem = $mem.LoadPercent -ge [double]$script:Config.memoryHighPercent
+    $emergencyMem = $mem.LoadPercent -ge [double]$script:Config.memoryEmergencyPercent
+    $pagingHigh = ($null -ne $pagesPerSec) -and ($pagesPerSec -ge [double]$script:Config.memoryPagesPerSecHigh)
+    $availableLow = $mem.AvailableMB -le [double]$script:Config.minimumAvailableMemoryMB
+    $highMem = $emergencyMem -or (
+        $rawHighMem -and
+        (
+            -not [bool]$script:Config.requirePagingForMemoryTrim -or
+            $pagingHigh -or
+            $availableLow
+        )
+    )
     $cool = ($cpu -le [double]$script:Config.cpuCoolPercent) -and
         ($mem.LoadPercent -le [double]$script:Config.memoryCoolPercent)
 
     if ($cool) {
         $restored = Restore-CalmPriorities
-        $script:LastStatus = "안정 CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $script:LastStatus = "안정 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec"
         if ($restored -gt 0) {
             $script:LastStatus += ", 복원 $restored"
         }
@@ -717,14 +836,15 @@ function Invoke-CalmPass {
     }
 
     if (-not ($highCpu -or $highMem)) {
-        $script:LastStatus = "감시 중 CPU $cpu%, RAM $($mem.LoadPercent)%"
+        $memNote = if ($rawHighMem -and -not $highMem) { ', RAM 높지만 페이징/가용메모리 정상' } else { '' }
+        $script:LastStatus = "감시 중 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec$memNote"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 감시 중"
         return $script:LastStatus
     }
 
     $cooldown = [int]$script:Config.actionCooldownSeconds
     if (((Get-Date) - $script:LastActionAt).TotalSeconds -lt $cooldown) {
-        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 대기 중"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec, 대기 중"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 대기 중"
         return $script:LastStatus
     }
@@ -735,7 +855,6 @@ function Invoke-CalmPass {
     $minMemMb = [double]$script:Config.minimumProcessMemoryMB
     $minCpu = [double]$script:Config.minimumProcessCpuPercent
     $maxCpuForTrim = [double]$script:Config.maxCpuPercentForMemoryTrim
-    $emergencyMem = $mem.LoadPercent -ge [double]$script:Config.memoryEmergencyPercent
 
     if ($highCpu) {
         $cpuSelected = $candidates |
@@ -780,9 +899,9 @@ function Invoke-CalmPass {
             }
 
             $trimReason = if ($emergencyMem) {
-                "RAM $($mem.LoadPercent)% >= 긴급 기준 $($script:Config.memoryEmergencyPercent)%, 작업셋 $($item.MemoryMB) MB"
+                "RAM $($mem.LoadPercent)% >= 긴급 기준 $($script:Config.memoryEmergencyPercent)%, Pg/s $pagesPerSec, 가용 $($mem.AvailableMB) MB, 작업셋 $($item.MemoryMB) MB"
             } else {
-                "RAM $($mem.LoadPercent)% >= 기준 $($script:Config.memoryHighPercent)%, 작업셋 $($item.MemoryMB) MB, 프로세스 CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
+                "RAM $($mem.LoadPercent)% >= 기준 $($script:Config.memoryHighPercent)%, Pg/s $pagesPerSec, 가용 $($mem.AvailableMB) MB, 작업셋 $($item.MemoryMB) MB, 프로세스 CPU $($item.CpuPercent)% <= $maxCpuForTrim%"
             }
             if ($highMem -and
                 $item.MemoryMB -ge $minMemMb -and
@@ -801,13 +920,13 @@ function Invoke-CalmPass {
     if ($actions -gt 0) {
         $script:LastActionAt = Get-Date
         $script:TotalActions += $actions
-        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 조치 $actions"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec, 조치 $actions"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 조치 $actions"
     } else {
-        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 안전 후보 없음"
+        $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, Pg/s $pagesPerSec, 안전 후보 없음"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 안전 후보 없음"
     }
-    Write-Log $script:LastStatus
+    Write-StatusLog $script:LastStatus
     return $script:LastStatus
 }
 
@@ -824,6 +943,9 @@ function Invoke-SelfTest {
     $script:Config.perProcessActionCooldownSeconds = 0
     $script:Config.minimumProcessMemoryMB = 1
     $script:Config.minimumProcessCpuPercent = 0
+    $script:Config.requirePagingForMemoryTrim = $false
+    $script:Config.memoryPagesPerSecHigh = 0
+    $script:Config.minimumAvailableMemoryMB = 1048576
     $script:Config.memoryEmergencyPercent = 1
     $script:Config.maxProcessesPerPass = 3
 
@@ -965,12 +1087,12 @@ function Start-TrayApp {
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
     $timer.Add_Tick({
-        if ($script:ConfigChangedFlag -and ((Get-Date) - $script:ConfigChangedAt).TotalSeconds -ge 2) {
-            $script:ConfigChangedFlag = $false
-            Invoke-ConfigReload
+        $status = Invoke-CalmPass
+        if ($script:ConfigIntervalChanged) {
+            $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
+            $script:ConfigIntervalChanged = $false
             $modeItem.Text = "모드: $(if ($script:DryRun) { 'dry-run' } else { 'active' })"
         }
-        $status = Invoke-CalmPass
         $statusItem.Text = "상태: $status"
         $checkItem.Text = "마지막 확인: $script:LastCheckSummary"
         $lastActionItem.Text = "마지막 조치: $(Get-ShortText $script:LastActionSummary 100)"
@@ -984,25 +1106,12 @@ function Start-TrayApp {
             $notify.ShowBalloonTip(3000)
         }
     })
-
-    $configDir = [System.IO.Path]::GetDirectoryName($ConfigPath)
-    $configFile = [System.IO.Path]::GetFileName($ConfigPath)
-    $watcher = New-Object System.IO.FileSystemWatcher($configDir, $configFile)
-    $watcher.NotifyFilter = [System.IO.NotifyFilters]::LastWrite
-    $watcher.EnableRaisingEvents = $true
-    $watcher.Add_Changed({
-        $script:ConfigChangedFlag = $true
-        $script:ConfigChangedAt = Get-Date
-    })
-
     $timer.Start()
-    $script:TrayTimer = $timer
 
     Write-Log "트레이 앱 시작. DryRun=$script:DryRun"
     try {
         [System.Windows.Forms.Application]::Run()
     } finally {
-        try { $watcher.EnableRaisingEvents = $false; $watcher.Dispose() } catch {}
         Stop-CalmKeeper '트레이 앱 종료'
         $notify.Visible = $false
         $notify.Dispose()
@@ -1031,4 +1140,6 @@ if ($NoTray) {
 } else {
     Start-TrayApp
 }
+
+
 
