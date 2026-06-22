@@ -22,6 +22,11 @@ $script:Paused = $false
 $script:LastStatus = '시작 중'
 $script:LastCheckSummary = '아직 확인 안 함'
 $script:LastActionSummary = '없음'
+$script:TotalActions = 0
+$script:LastNotifiedActionCount = 0
+$script:TrayNotify = $null
+$script:ConfigChangedFlag = $false
+$script:ConfigChangedAt = [datetime]::MinValue
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -108,6 +113,7 @@ function Get-DefaultConfig {
             'Code', 'devenv', 'Codex'
         )
         logRetentionLines = 1000
+        notifyOnAction = $true
     }
 }
 
@@ -177,6 +183,7 @@ function Normalize-Config {
     $Config.protectForegroundProcess = [bool]$Config.protectForegroundProcess
     $Config.protectForegroundProcessName = [bool]$Config.protectForegroundProcessName
     $Config.logRetentionLines = Get-ClampedInt $Config.logRetentionLines $default.logRetentionLines 0 100000
+    $Config.notifyOnAction = [bool]$Config.notifyOnAction
 
     if ($null -eq $Config.protectedProcessNames) {
         $Config.protectedProcessNames = $default.protectedProcessNames
@@ -228,6 +235,22 @@ function Read-Config {
     } catch {
         Write-Log "설정 읽기 실패, 기본값 사용: $($_.Exception.Message)"
         return (Normalize-Config (Get-DefaultConfig))
+    }
+}
+
+function Invoke-ConfigReload {
+    try {
+        $newConfig = Read-Config
+        $script:Config = $newConfig
+        $script:DryRun = [bool]($WhatIf -or $script:Config.dryRun)
+        Write-Log "설정 다시 읽음"
+        if ($script:TrayNotify) {
+            $script:TrayNotify.BalloonTipTitle = $script:AppName
+            $script:TrayNotify.BalloonTipText = '설정을 다시 읽었습니다.'
+            $script:TrayNotify.ShowBalloonTip(2000)
+        }
+    } catch {
+        Write-Log "설정 다시 읽기 실패: $($_.Exception.Message)"
     }
 }
 
@@ -768,6 +791,7 @@ function Invoke-CalmPass {
 
     if ($actions -gt 0) {
         $script:LastActionAt = Get-Date
+        $script:TotalActions += $actions
         $script:LastStatus = "압박 CPU $cpu%, RAM $($mem.LoadPercent)%, 조치 $actions"
         $script:LastCheckSummary = "$($checkStartedAt.ToString('HH:mm:ss')) 확인 - 조치 $actions"
     } else {
@@ -834,6 +858,7 @@ function Start-TrayApp {
     $notify.Icon = [System.Drawing.SystemIcons]::Shield
     $notify.Text = $script:AppName
     $notify.Visible = $true
+    $script:TrayNotify = $notify
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $statusItem = $menu.Items.Add('상태: 시작 중')
@@ -844,6 +869,8 @@ function Start-TrayApp {
     $modeItem.Enabled = $false
     $lastActionItem = $menu.Items.Add('마지막 조치: 없음')
     $lastActionItem.Enabled = $false
+    $statsItem = $menu.Items.Add('조치 횟수: 0회')
+    $statsItem.Enabled = $false
     [void]$menu.Items.Add('-')
 
     $pauseItem = $menu.Items.Add('일시정지')
@@ -866,11 +893,24 @@ function Start-TrayApp {
         $statusItem.Text = "상태: $status"
         $checkItem.Text = "마지막 확인: $script:LastCheckSummary"
         $lastActionItem.Text = "마지막 조치: $(Get-ShortText $script:LastActionSummary 100)"
+        $statsItem.Text = "조치 횟수: $($script:TotalActions)회"
+        if ($script:Config.notifyOnAction -and $script:TotalActions -gt $script:LastNotifiedActionCount) {
+            $script:LastNotifiedActionCount = $script:TotalActions
+            $notify.BalloonTipTitle = $script:AppName
+            $notify.BalloonTipText = Get-ShortText $script:LastActionSummary 200
+            $notify.ShowBalloonTip(3000)
+        }
     })
 
     $configItem = $menu.Items.Add('설정 열기')
     $configItem.Add_Click({
         Start-Process notepad.exe -ArgumentList "`"$ConfigPath`""
+    })
+
+    $reloadConfigItem = $menu.Items.Add('설정 다시 읽기')
+    $reloadConfigItem.Add_Click({
+        Invoke-ConfigReload
+        $modeItem.Text = "모드: $(if ($script:DryRun) { 'dry-run' } else { 'active' })"
     })
 
     $logItem = $menu.Items.Add('로그 열기')
@@ -897,19 +937,43 @@ function Start-TrayApp {
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
     $timer.Add_Tick({
+        if ($script:ConfigChangedFlag -and ((Get-Date) - $script:ConfigChangedAt).TotalSeconds -ge 2) {
+            $script:ConfigChangedFlag = $false
+            Invoke-ConfigReload
+            $modeItem.Text = "모드: $(if ($script:DryRun) { 'dry-run' } else { 'active' })"
+        }
         $status = Invoke-CalmPass
         $statusItem.Text = "상태: $status"
         $checkItem.Text = "마지막 확인: $script:LastCheckSummary"
         $lastActionItem.Text = "마지막 조치: $(Get-ShortText $script:LastActionSummary 100)"
+        $statsItem.Text = "조치 횟수: $($script:TotalActions)회"
         $tip = "$script:AppName - $status"
         $notify.Text = Get-ShortText $tip 63
+        if ($script:Config.notifyOnAction -and $script:TotalActions -gt $script:LastNotifiedActionCount) {
+            $script:LastNotifiedActionCount = $script:TotalActions
+            $notify.BalloonTipTitle = $script:AppName
+            $notify.BalloonTipText = Get-ShortText $script:LastActionSummary 200
+            $notify.ShowBalloonTip(3000)
+        }
     })
+
+    $configDir = [System.IO.Path]::GetDirectoryName($ConfigPath)
+    $configFile = [System.IO.Path]::GetFileName($ConfigPath)
+    $watcher = New-Object System.IO.FileSystemWatcher($configDir, $configFile)
+    $watcher.NotifyFilter = [System.IO.NotifyFilters]::LastWrite
+    $watcher.EnableRaisingEvents = $true
+    $watcher.Add_Changed({
+        $script:ConfigChangedFlag = $true
+        $script:ConfigChangedAt = Get-Date
+    })
+
     $timer.Start()
 
     Write-Log "트레이 앱 시작. DryRun=$script:DryRun"
     try {
         [System.Windows.Forms.Application]::Run()
     } finally {
+        try { $watcher.EnableRaisingEvents = $false; $watcher.Dispose() } catch {}
         Stop-CalmKeeper '트레이 앱 종료'
         $notify.Visible = $false
         $notify.Dispose()

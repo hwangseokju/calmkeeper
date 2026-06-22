@@ -70,5 +70,6 @@
     "devenv",
     "Codex"
   ],
-  "logRetentionLines": 1000
+  "logRetentionLines": 1000,
+  "notifyOnAction": true
 }
