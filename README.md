@@ -151,6 +151,17 @@ calmkeeper.config.json
 - Chrome, Edge, Claude, ChatGPT, OneDrive, KakaoTalk, Telegram 같은 인터랙티브 앱은 기본 보호 목록에 포함
 - 상태 로그는 기본 60초 간격으로 제한해 로그 폭주를 줄임
 
+현재 기본값은 버벅임 방지를 우선해서 보수적으로 잡혀 있습니다.
+
+- RAM 조치는 88% 이상부터 시작
+- RAM이 높아도 Pages/sec와 사용 가능 메모리가 정상이라면 작업셋 정리를 하지 않음
+- 최근 사용 앱 이름은 5분 동안 보호
+- 같은 프로세스는 기본 10분 동안 반복 조치하지 않음
+- Chrome, Edge, Claude, ChatGPT, OneDrive, KakaoTalk, Telegram 같은 인터랙티브 앱은 기본 보호 목록에 포함
+- 상태 로그는 기본 60초 간격으로 제한해 로그 폭주를 줄임
+
+설정 파일을 저장하면 다음 체크 주기에 자동으로 반영됩니다. CalmKeeper를 재시작하지 않아도 됩니다.
+
 ## 역할 분리
 
 CalmKeeper가 맡는 일:
