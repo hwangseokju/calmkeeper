@@ -27,6 +27,7 @@ $script:LastNotifiedActionCount = 0
 $script:TrayNotify = $null
 $script:ConfigChangedFlag = $false
 $script:ConfigChangedAt = [datetime]::MinValue
+$script:TrayTimer = $null
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -238,11 +239,19 @@ function Read-Config {
     }
 }
 
+function Test-StartupShortcut {
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) "$script:AppName.lnk"
+    return (Test-Path $shortcutPath)
+}
+
 function Invoke-ConfigReload {
     try {
         $newConfig = Read-Config
         $script:Config = $newConfig
         $script:DryRun = [bool]($WhatIf -or $script:Config.dryRun)
+        if ($script:TrayTimer) {
+            $script:TrayTimer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
+        }
         Write-Log "설정 다시 읽음"
         if ($script:TrayNotify) {
             $script:TrayNotify.BalloonTipTitle = $script:AppName
@@ -921,6 +930,18 @@ function Start-TrayApp {
         Start-Process notepad.exe -ArgumentList "`"$script:LogPath`""
     })
 
+    $startupState = if (Test-StartupShortcut) { '등록됨' } else { '미등록' }
+    $startupItem = $menu.Items.Add("시작프로그램: $startupState")
+    $startupItem.Add_Click({
+        if (Test-StartupShortcut) {
+            Uninstall-StartupShortcut
+            $startupItem.Text = '시작프로그램: 미등록'
+        } else {
+            Install-StartupShortcut
+            $startupItem.Text = '시작프로그램: 등록됨'
+        }
+    })
+
     [void]$menu.Items.Add('-')
     $exitItem = $menu.Items.Add('종료')
     $exitItem.Add_Click({
@@ -933,6 +954,13 @@ function Start-TrayApp {
     $notify.BalloonTipTitle = $script:AppName
     $notify.BalloonTipText = 'CPU/RAM 보호 도구가 실행 중입니다.'
     $notify.ShowBalloonTip(1500)
+
+    $notify.Add_MouseDoubleClick({
+        if (-not (Test-Path $script:LogPath)) {
+            New-Item -ItemType File -Path $script:LogPath -Force | Out-Null
+        }
+        Start-Process notepad.exe -ArgumentList "`"$script:LogPath`""
+    })
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
@@ -968,6 +996,7 @@ function Start-TrayApp {
     })
 
     $timer.Start()
+    $script:TrayTimer = $timer
 
     Write-Log "트레이 앱 시작. DryRun=$script:DryRun"
     try {
