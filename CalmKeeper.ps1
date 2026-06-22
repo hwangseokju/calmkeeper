@@ -24,6 +24,8 @@ $script:Paused = $false
 $script:LastStatus = '시작 중'
 $script:LastCheckSummary = '아직 확인 안 함'
 $script:LastActionSummary = '없음'
+$script:ConfigLastWriteTime = $null
+$script:ConfigIntervalChanged = $false
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -113,10 +115,13 @@ function Get-DefaultConfig {
             'vmmem', 'vmmemWSL',
             'Code', 'devenv', 'Codex', 'Cursor',
             'chrome', 'msedge', 'claude', 'ChatGPT',
-            'KakaoTalk', 'Telegram', 'OneDrive'
+            'KakaoTalk', 'Telegram', 'OneDrive',
+            'lsaiso', 'hvhost', 'wslhost', 'wslservice'
         )
         statusLogIntervalSeconds = 60
         logRetentionLines = 1000
+        protectForegroundChildren = $true
+        foregroundChildrenDepth = 4
     }
 }
 
@@ -190,6 +195,8 @@ function Normalize-Config {
     $Config.protectForegroundProcessName = [bool]$Config.protectForegroundProcessName
     $Config.statusLogIntervalSeconds = Get-ClampedInt $Config.statusLogIntervalSeconds $default.statusLogIntervalSeconds 5 3600
     $Config.logRetentionLines = Get-ClampedInt $Config.logRetentionLines $default.logRetentionLines 0 100000
+    $Config.protectForegroundChildren = [bool]$Config.protectForegroundChildren
+    $Config.foregroundChildrenDepth = Get-ClampedInt $Config.foregroundChildrenDepth $default.foregroundChildrenDepth 1 10
 
     if ($null -eq $Config.protectedProcessNames) {
         $Config.protectedProcessNames = $default.protectedProcessNames
@@ -238,6 +245,8 @@ function Read-Config {
     if (-not (Test-Path $ConfigPath)) {
         $default = Get-DefaultConfig
         $default | ConvertTo-Json -Depth 4 | Set-Content -Path $ConfigPath -Encoding UTF8
+        $item = Get-Item $ConfigPath -ErrorAction SilentlyContinue
+        if ($item) { $script:ConfigLastWriteTime = $item.LastWriteTime }
         return (Normalize-Config $default)
     }
 
@@ -251,6 +260,8 @@ function Read-Config {
             }
         }
 
+        $item = Get-Item $ConfigPath -ErrorAction SilentlyContinue
+        if ($item) { $script:ConfigLastWriteTime = $item.LastWriteTime }
         return (Normalize-Config $loaded)
     } catch {
         Write-Log "설정 읽기 실패, 기본값 사용: $($_.Exception.Message)"
@@ -467,6 +478,38 @@ function Get-ProtectedNameSet {
     return $set
 }
 
+function Get-ParentPidMap {
+    $map = @{}
+    try {
+        foreach ($p in (Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)) {
+            $map[[int]$p.ProcessId] = [int]$p.ParentProcessId
+        }
+    } catch {
+        Write-Log "Parent PID map failed: $($_.Exception.Message)"
+    }
+    return $map
+}
+
+function Test-ChildOfForeground {
+    param(
+        [int]$ProcessId,
+        [hashtable]$ParentMap,
+        [int]$MaxDepth
+    )
+
+    $current = $ProcessId
+    for ($i = 0; $i -lt $MaxDepth; $i++) {
+        if (-not $ParentMap.ContainsKey($current)) { break }
+        $parent = $ParentMap[$current]
+        if ($parent -le 4) { break }
+        if ($script:RecentForegroundPids.ContainsKey($parent)) {
+            return $true
+        }
+        $current = $parent
+    }
+    return $false
+}
+
 function Get-ProcessSnapshot {
     $now = Get-Date
     [void](Get-ForegroundProcessId)
@@ -474,6 +517,15 @@ function Get-ProcessSnapshot {
     $minMemBytes = [int64]$script:Config.minimumProcessMemoryMB * 1MB
     $minCpu = [double]$script:Config.minimumProcessCpuPercent
     $items = New-Object System.Collections.Generic.List[object]
+
+    $parentMap = $null
+    $checkChildren = [bool]$script:Config.protectForegroundChildren -and
+        [bool]$script:Config.protectForegroundProcess -and
+        $script:RecentForegroundPids.Count -gt 0
+    if ($checkChildren) {
+        $parentMap = Get-ParentPidMap
+    }
+    $childDepth = [int]$script:Config.foregroundChildrenDepth
 
     foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
         try {
@@ -484,6 +536,9 @@ function Get-ProcessSnapshot {
                 continue
             }
             if (Test-ForegroundProtectedName -ProcessName $process.ProcessName) {
+                continue
+            }
+            if ($checkChildren -and $parentMap -and (Test-ChildOfForeground -ProcessId $process.Id -ParentMap $parentMap -MaxDepth $childDepth)) {
                 continue
             }
             if ($protected.Contains($process.ProcessName)) {
@@ -688,7 +743,36 @@ function Restore-CalmPriorities {
     return $restored
 }
 
+function Test-ConfigChanged {
+    try {
+        if (-not (Test-Path $ConfigPath)) { return $false }
+        $item = Get-Item $ConfigPath -ErrorAction SilentlyContinue
+        if (-not $item) { return $false }
+        if ($null -eq $script:ConfigLastWriteTime) {
+            $script:ConfigLastWriteTime = $item.LastWriteTime
+            return $false
+        }
+        if ($item.LastWriteTime -ne $script:ConfigLastWriteTime) {
+            $script:ConfigLastWriteTime = $item.LastWriteTime
+            return $true
+        }
+    } catch {}
+    return $false
+}
+
+function Invoke-ConfigReload {
+    $oldInterval = [int]$script:Config.checkIntervalSeconds
+    $newConfig = Read-Config
+    $script:Config = $newConfig
+    $script:DryRun = [bool]($WhatIf -or $script:Config.dryRun)
+    $script:ConfigIntervalChanged = ([int]$script:Config.checkIntervalSeconds -ne $oldInterval)
+    Write-Log "설정 다시 읽음. DryRun=$script:DryRun"
+}
+
 function Invoke-CalmPass {
+    if (Test-ConfigChanged) {
+        Invoke-ConfigReload
+    }
     $checkStartedAt = Get-Date
 
     if ($script:Paused) {
@@ -953,6 +1037,11 @@ function Start-TrayApp {
     $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
     $timer.Add_Tick({
         $status = Invoke-CalmPass
+        if ($script:ConfigIntervalChanged) {
+            $timer.Interval = [Math]::Max(1000, [int]$script:Config.checkIntervalSeconds * 1000)
+            $script:ConfigIntervalChanged = $false
+            $modeItem.Text = "모드: $(if ($script:DryRun) { 'dry-run' } else { 'active' })"
+        }
         $statusItem.Text = "상태: $status"
         $checkItem.Text = "마지막 확인: $script:LastCheckSummary"
         $lastActionItem.Text = "마지막 조치: $(Get-ShortText $script:LastActionSummary 100)"

@@ -84,5 +84,7 @@
     "OneDrive"
   ],
   "statusLogIntervalSeconds": 60,
-  "logRetentionLines": 1000
+  "logRetentionLines": 1000,
+  "protectForegroundChildren": true,
+  "foregroundChildrenDepth": 4
 }

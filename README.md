@@ -106,6 +106,8 @@ calmkeeper.config.json
 - `minimumAvailableMemoryMB`: 사용 가능 메모리가 이 값보다 낮으면 RAM 압박으로 판단
 - `memoryEmergencyPercent`: RAM 긴급 상태 기준
 - `protectForegroundProcessName`: 최근 사용한 앱과 같은 이름의 helper 프로세스도 보호
+- `protectForegroundChildren`: `true`면 포그라운드 앱의 자식 프로세스(렌더러, 언어 서버 등)도 보호. 기본값 `true`
+- `foregroundChildrenDepth`: 자식 보호 시 조상을 몇 단계까지 올라갈지. 기본값 `4` (증손자까지)
 - `protectedProcessNames`: 절대 건드리지 않을 프로세스 목록
 - `dryRun`: `true`면 실제 변경 없이 로그만 남김
 
@@ -117,6 +119,8 @@ calmkeeper.config.json
 - 같은 프로세스는 기본 10분 동안 반복 조치하지 않음
 - Chrome, Edge, Claude, ChatGPT, OneDrive, KakaoTalk, Telegram 같은 인터랙티브 앱은 기본 보호 목록에 포함
 - 상태 로그는 기본 60초 간격으로 제한해 로그 폭주를 줄임
+
+설정 파일을 저장하면 다음 체크 주기에 자동으로 반영됩니다. CalmKeeper를 재시작하지 않아도 됩니다.
 
 ## 역할 분리
 
